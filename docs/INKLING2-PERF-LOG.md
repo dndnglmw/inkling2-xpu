@@ -425,3 +425,31 @@ top-1, KL 0.00000, 12/12 greedy text. Quality captures may therefore always run 
 requires: it crashes under the graphed server with `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` on its codebook
 H2D copy mid-forward; isolated repros pass, so it is an engine-context effect, likely the profile-run pool
 teardown), and the numbers transfer 1:1 to the graphed production config.
+
+## 12. Host RAM and the GPU mirror (Nov 22)
+
+Question: why does the host show ~70 GiB of 91 GiB RAM used while every process sums to only 16.9 GiB?
+
+Answer: `/proc/meminfo` on this kernel (Ubuntu 26.04, xe driver) carries a `GPUActive` field - **58.4 GiB of
+system RAM is accounted as GPU-active**, and `free` folds it into "used". It is static while a server runs
+(identical readings 90 minutes apart) because the engine pre-allocates its full working set at startup
+(`gpu_memory_utilization` 0.85): per card, ~8.9 GiB weights + ~7.0 GiB BF16 KV pool + activations/graph pools
+= ~27-30 GiB on-card (`torch.xpu.mem_get_info`: 30.1/31.9 and 28.9/31.9 used), and the kernel accounts the
+same working set against host RAM. The books close exactly: AnonPages 12.6 + Cached 12.3 + slab/tables ~1 +
+GPUActive 58.4 = MemTotal 91.1. Process RSS sum 16.9 GiB (api_server 2.2 + EngineCore 1.9 + two workers
+5.9/5.9 + opencode/dashboard/desktop). Swap 764 MiB = desktop apps pushed out by the GPU mirror; harmless.
+
+So "high RAM usage" is **not a leak** - it is the driver's GPU memory accounting, and it scales with the GPU
+working set. Two consequences worth recording:
+
+* **The 1M-context hang is now explained mechanically**: raising `MAX_MODEL_LEN` to 1M grows the planned KV
+  pool, GPUActive grows past host RAM, and the host thrashes (DECISIONS section 8).
+* **Real headroom = MemAvailable (20 GiB at this operating point), not free**. Before raising the cap, pool
+  size, or gpu_util, check that MemAvailable stays comfortably positive; the GPU mirror grows one-for-one
+  with on-card allocations.
+
+Levers if host headroom is ever needed: smaller `GPU_UTIL` (smaller pools, less GPUActive), fewer concurrent
+full-context seqs (same), or an fp8 KV pool (halves the KV share of the mirror - rejected on quality grounds,
+section 11.2). No xe module parameter exposes allocation placement; ReBAR is enabled (32 GB BAR 2 on both
+cards, asserted in `01-sudo-system-setup.sh`), so the mirror is not a small-BAR workaround - it is how this
+kernel accounts the driver's memory.
