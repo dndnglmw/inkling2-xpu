@@ -516,3 +516,35 @@ gap is LM head (estimated ~2 ms from its 0.93 GB/step weight read), sampling (~1
 roughly 8-9 ms of scheduler/dispatch gaps - all still unprofiled at the step level (the tprof wrappers
 cover model forwards only; their flag is consumed on first capture, so concurrent drivers starve each
 other). Next lever: a whole-step profiler capture.
+
+
+## 14. Iteration-elapsed instrumentation: the decode remainder is inside the bracket (Nov 22)
+
+Enabled `--enable-logging-iteration-details` (GPU-event timing of the whole step, from execute_model
+start to sample_tokens end; loggers.py emits "iteration elapsed time" per Iteration line). One gate fix
+was required: the fork's `gpu_iteration_timing` property required `device_type == "cuda"`, so the timer
+silently never armed on XPU - patched to `in ("cuda", "xpu")` (vllm/config/vllm.py,
+instrumentation-only, flag-gated, default off). Result at 8K decode iterations: elapsed p50 34.4 ms,
+p90 34.8 (n=363; the 16.4 s max is the prefill iteration). Same-run deep4 walls: code 35.9 /
+prose 32.4 / verbatim 31.6 ms per step.
+
+Attribution: the event bracket covers essentially the whole wall step (within ~1.5 ms slop). The
+"~8-13 ms unattributed scheduler/dispatch remainder" from the earlier tprof-based model DOES NOT EXIST:
+tprof's 27.9 ms body figure is a sync-perturbed lower bound (torch.xpu.synchronize around each phase
+removes overlap), and LM head (~1-2 ms), draft (0.4 ms) and sampling/accept all run inside the bracket.
+The decode step is device-work-bound end to end; wall - elapsed leaves no large host-side gap.
+
+Killed by this: the "attack the ~8-9 ms scheduler/dispatch gap" lever from the Nov 22 consult (~20% of
+the step, the last big suspected item). Remaining decode levers are small: graph coverage for LM head +
+sampling (~1-2 ms), the near-attention +1.2 ms growth (~1 ms), drafter quality (retraining, out of scope).
+
+Also this round: immediate command lists (`SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS` /
+`UR_L0_USE_IMMEDIATE_COMMANDLISTS=1`) tested: bit-identical (576/576 top-1, KL 0.00000) but
+speed-neutral (step times +-1 ms in mixed directions; the prose tok/s jump was acceptance noise,
+tok/step 2.61 -> 3.01 with unchanged step time). Not adopted. Caveat: bit-identical output is also
+consistent with the env var not being honored; disambiguating via SYCL_UR_TRACE is not worth it absent
+a speed win. Verified LM head is vocab-sharded under TP2 (ParallelLMHead, one bmm read for all verify
+rows) - the "shard the head" lever does not exist. The consult's host-sync suspicion was refuted for
+the forward/accept path (device-side sampling kernels); the one per-step sync cluster
+(async_utils.py:193 copy_event.synchronize + tolist) runs on the async output path, and wall ~= elapsed
+shows it is not costing visible time.

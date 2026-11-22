@@ -249,3 +249,13 @@ the bf16 reference, shared-top-20 KL mean 0.069 / max 11.5 against the KL <= 0.0
 win measured. The FP8-era "+1.2%, bit-identical" result does not transfer (and the first retest of it
 was itself an env-passthrough no-op - both arms were the production config). The knob stays OFF in
 production and is not recommended for any workload. Detail: PERF-LOG section 13.
+
+
+## 15. Decode "scheduler/dispatch gap" lever: does not exist (Nov 22)
+
+The ~8-13 ms unattributed remainder in the decode-step model was an artifact of a sync-perturbed tprof
+body measurement (27.9 ms was a lower bound). GPU-event iteration timing - after patching the CUDA-only
+gate in vllm/config/vllm.py to include XPU - shows the step bracket at p50 34.4 ms against a 32-36 ms
+wall: the device bracket covers the whole step and there is no large host-side gap to reclaim. Decode
+is device-work-bound end to end; what remains is small kernel work (LM head + sampling graph coverage,
+~1-2 ms) and the near-attention growth (~1 ms). Detail: PERF-LOG section 14.
