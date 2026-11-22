@@ -331,8 +331,9 @@ within the +-2 ms launch noise).
 Decode-step composition at short context (target forward 27.94 ms device): MoE 12.4 (gate/up 7.041, down 3.962,
 combine 0.328, router 0.724, reduce 0.359) = 44%; dense GEMM 4.3 = 15%; near attention + KV write + vendor far
 3.6 = 13%; loop mixes/controllers 2.6 = 9%; casts/concat/copies ~2.0 = 7%; all-reduce 1.4 = 5%; conv + rows 1.4 =
-5%. The remaining ~11-13 ms of the ~39-41 ms step is the drafter (1.43 ms of device time on one draft-forward
-capture, taken at a T=8 warm-up shape, so indicative only), LM head and sampling, and dispatch gaps; this remainder
+5%. The remaining ~11-13 ms of the ~39-41 ms step is the drafter (re-measured Nov 22 via INKLING_PROF=1 ph() over 16 draft forwards at the T=4 verify
+shape: 0.4 ms/step total - ctx_kv 0.1 + forward 0.3; the earlier 1.43 was a single tprof capture at a
+T=8 warm-up shape), LM head and sampling, and dispatch gaps; this remainder
 was not profiled directly.
 
 ## 10. Other numbers worth keeping
@@ -480,13 +481,22 @@ With the server stopped the same host idles at ~12 GiB used. Lower `GPU_UTIL` tr
 proportionally (0.78 measured above) at a direct concurrency cost.
 
 
-## 13. One-shot AR on BF16, and long-context launch noise (Nov 22)
+## 13. One-shot AR on BF16: REJECTED; long-context launch noise (Nov 22)
 
-One-shot P2P all-reduce (`VLLM_XPU_ONESHOT_AR=1`) retested on the current BF16 build (the +1.2% figure
-was from the FP8-era build): bit-identical outputs on the 12-prompt quality suite (576/576 top-1,
-KL 0.00000), but speed is mixed and mostly within long-context launch noise - 8K: code 89.9 (-4.4%),
-prose 94.9 (+1.9%), verbatim 106.3 (-7.0%); 234K: code 75.2 (-2.6%), prose 73.1, verbatim 45.9 (+0.7%).
-Production keeps it OFF; the knob is documented for prose-heavy workloads.
+One-shot P2P all-reduce (`VLLM_XPU_ONESHOT_AR=1`) is REJECTED on the current BF16 build. The first
+retest was a measurement failure: the A/B launcher's env passthrough never reached the container (sed
+anchor mismatch after an earlier edit), so both arms ran the identical production config - the
+"bit-identical 576/576, speed neutral" result was production-vs-production. Retried hours later with
+the env verified inside the container (`VLLM_XPU_ONESHOT_AR=1` confirmed via docker exec): AR FAILS
+the exactness gate - top-1 agreement 554/576 vs the bf16 reference, shared-top-20 KL mean 0.069 /
+max 11.5 (gate: KL <= 0.002) - and showed no speed win (the tok/s benches were confounded by an
+accidental double-driver race, but the exactness gate alone rejects it). The FP8-era "+1.2%,
+bit-identical" claim does not transfer to the current build. Production stays OFF; the knob is not
+recommended for any workload.
+
+Protocol rules banked: (a) verify every passthrough env inside the container before trusting a cell's
+data; (b) never let two driver scripts share one log/server - concurrent request streams change
+batching and confound tok/s benches (single-request exactness captures are immune).
 
 **Long-context acceptance is launch-noisy**: prose-summary tok/step at ~234K measured 2.35, 2.56 and 2.79
 across three same-config launches (tok/s 58.8-74.6, about +-11%), while short-prompt logits are
@@ -499,3 +509,10 @@ The suspect mechanism for the drafter's sensitivity: the markov head consumes ta
 bit patterns shift with any numeric-path change (KV dtype, reduction order), and prose acceptance moves
 -0.39 / +0.44 tokens/step across such shifts. Not fixable without drafter retraining; verification keeps
 outputs correct regardless (spec decoding is correctness-preserving; only speed moves).
+
+Decode remainder, re-attributed (same day): with the drafter measured at 0.4 ms/step (ph() accumulation
+over 16 draft forwards at the T=4 verify shape: ctx_kv 0.1 + forward 0.3), the ~11-13 ms wall-vs-device
+gap is LM head (estimated ~2 ms from its 0.93 GB/step weight read), sampling (~1 ms, estimate) and
+roughly 8-9 ms of scheduler/dispatch gaps - all still unprofiled at the step level (the tprof wrappers
+cover model forwards only; their flag is consumed on first capture, so concurrent drivers starve each
+other). Next lever: a whole-step profiler capture.

@@ -240,3 +240,12 @@ across launches (section 8).
   transforms x the loop architecture's per-pass cache writes; TP1-vs-TP2 layout). Live validation via
   ab_quality is mandatory for any KV experiment from now on; eager captures are valid for the graphed
   production config (proven 576/576, KL 0.00000).
+
+
+## 14. One-shot P2P all-reduce: rejected (Nov 22)
+
+`VLLM_XPU_ONESHOT_AR=1` fails the exactness gate on the current BF16 build: 554/576 top-1 agreement vs
+the bf16 reference, shared-top-20 KL mean 0.069 / max 11.5 against the KL <= 0.002 gate, and no speed
+win measured. The FP8-era "+1.2%, bit-identical" result does not transfer (and the first retest of it
+was itself an env-passthrough no-op - both arms were the production config). The knob stays OFF in
+production and is not recommended for any workload. Detail: PERF-LOG section 13.
