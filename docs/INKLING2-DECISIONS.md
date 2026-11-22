@@ -228,3 +228,11 @@ across launches (section 8).
 * **Acceptance is launch-deterministic on this stack:** same dtype across launches = 576/576 top-1 agreement,
   KL 0.00000, 12/12 greedy text (both dtypes). Cross-dtype or cross-depth differences are therefore real
   effects, not noise.
+
+* **TurboQuant tq4: live-rejected too (Nov 22).** Simulated 0.0055; live 0.342 mean KL, top-1 69%,
+  greedy 4/12 - the same damage as live FP8 KV. The FP8-KV fix plan is revised accordingly: no quantised-KV
+  engineering (per-head fp8 scales, packed tq4, anything) until the kv_sim-vs-live gap (~60-160x on both
+  schemes) is root-caused - the sim harness does not model the real cache path (suspects: clip / value-norm
+  transforms x the loop architecture's per-pass cache writes; TP1-vs-TP2 layout). Live validation via
+  ab_quality is mandatory for any KV experiment from now on; eager captures are valid for the graphed
+  production config (proven 576/576, KL 0.00000).

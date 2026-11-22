@@ -406,3 +406,22 @@ exceeds its bandwidth saving on this port.
 
 **Production switched to BF16 KV on Nov 22** (unit `EXTRA_ARGS` no longer sets `--kv-cache-dtype`; verified
 pool 439,959 tokens, 1.68x concurrency). Sole cost: concurrency 2.45x -> 1.68x.
+
+### 11.3 TurboQuant tq4 live, and the eager-vs-graph control (Nov 22)
+
+The Nov-21 simulation had TurboQuant-style tq4 (Hadamard rotation + Lloyd-Max) at KL 0.0055 vs naive int4
+0.0595. Measured live (`INKLING_KV_SIM=tq4`, BF16 storage, eager server, same ab_quality suite, compared
+against a matched eager BF16 capture): **mean KL 0.34235, max 16.58, top-1 agreement 396/576 (69%), greedy
+text 4/12** - statistically the same damage as the live FP8 KV cache (0.318). Needles still found at
+61K/124K/243K on both. The tq4 simulation missed the live error by ~62x, exactly like the fp8 simulation
+(~160x): **the kv_sim roundtrip hook does not model what the real cache path does on this stack, and
+simulated KV-quantisation quality claims are void until the gap is root-caused** (prime suspects: the
+checkpoint's clip/L2/value-norm transforms (`qk_l2_clip_threshold`, `rel_l2_clip_threshold`,
+`use_value_norm_no_gamma`) interacting with the loop architecture's per-pass cache writes, and the TP2 cache
+layout - the offline sim numbers were taken TP1/eager/20K).
+
+Control: **eager and graphed servers are numerically identical** - BF16 eager vs BF16 graphed = 576/576
+top-1, KL 0.00000, 12/12 greedy text. Quality captures may therefore always run eager (which the sim hook
+requires: it crashes under the graphed server with `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` on its codebook
+H2D copy mid-forward; isolated repros pass, so it is an engine-context effect, likely the profile-run pool
+teardown), and the numbers transfer 1:1 to the graphed production config.
