@@ -1,0 +1,341 @@
+# Inkling 2 Mini on 2x Arc Pro B65 — performance log
+
+Written 2026-11-22. Companions: `SETUP/INKLING2-GO-LIVE.md` (operations), `SETUP/INKLING2-DECISIONS.md`
+(decisions and rejected ideas). Numbers are recorded as measured; nothing is rounded to improve a story.
+Where two figures disagree, both are given with their sources.
+
+## 0. Conventions and caveats
+
+* Hardware: 2x Arc Pro B65, tensor parallel 2. GPU0 is on PCIe Gen5 x16 (46-57 GB/s measured), GPU1 on a PCIe Gen4
+  x4 link (7 GB/s measured) (`INKLING2_XPU_HANDOFF.md` Session 3).
+* Model: native NVFP4 experts (layers 0-19) and MXFP8 (layers 20-23), rest bf16; weights 8.9 GiB per card.
+* "Clean server" = container `inkling2-tp2` from `~/work/serve-noprof.sh`: max-model-len 262144,
+  max-num-seqs 8, 2048-token chunks, gpu-memory-utilization 0.85, prefix caching on, XPU decode graphs
+  (sizes 1,2,4,8), `--kv-cache-dtype fp8`, DSpark depth 3. Deviations are stated per table.
+* Dates: Nov 21 = the daytime work (up to and including the 1M-context pass and the far-region fold);
+  Nov 21 night / Nov 22 = the prefill, 4096-chunk and fusion work. Exact timestamps of individual runs were not
+  recorded; the 4096-chunk server's own log line is `11-22 00:17:54`.
+* **Per-launch nondeterminism:** two launches of the same build gave different acceptance for the same prompt
+  (tokens/step 3.11 / 2.42 / 3.64 vs 3.17 / 2.59 / 3.65 for code / prose / quote). Inside one launch a repeated
+  request reproduces to two decimals. Step-time comparisons across launches therefore carry about +-2 ms; the
+  kernel profiler and bitwise unit tests are the deterministic evidence.
+* **PROF-mode end-to-end tok/s is not representative:** `INKLING_PROF=1` adds roughly 0.9 s per chunk outside the
+  forward pass (850 tok/s measured under PROF vs 1316 on the clean server for the same stage). Per-chunk
+  `forward_wall` from PROF is the usable figure.
+* Prefill benchmark: `agents/prefill_bench.py`, one cold request, `max_tokens=1`, text = concatenated Python source
+  files (diverse routing; repetitive filler gives unrealistically narrow expert routing). Token counts are what the
+  server reported as `prompt_tokens`; the labels 32K/128K/241K are the nominal targets.
+
+## 1. Prefill, end to end (tok/s)
+
+| Stage | Config | ~32K | ~128K | ~241K |
+|---|---|---|---|---|
+| **Baseline, diverse text** (Nov 21) | clean server, random corpus order | **1316** (33,584 tokens, 25.5 s) | **1283** (127,688 tokens, 99.5 s) | **1139** (240,962 tokens, 211.5 s) |
+| After controller-GEMM, sconv tile, draft fold; fixed corpus (Nov 21 night) | clean server | 1725 (36,923 tokens, 21.4 s) | 1449 (124,669 tokens, 86.0 s) | 1370 (229,712 tokens, 167.6 s) |
+| **After Option A** (Nov 22) | + multi-pointer mix, tiered-MoE glue, attention tile (128,128,32); fixed corpus | **1931** (36,923 tokens, 19.1 s) | **1714** (124,669 tokens, 72.7 s) | **1480** (229,712 tokens, 155.2 s) |
+| 4096-token chunks (Nov 22) | `serve-4096.sh`, 4096 chunks, same corpus | **2177** (17.0 s) | **1943** (64.2 s) | **1703** (134.9 s) |
+
+Earlier figures on repetitive **filler** text (not comparable with the table, which uses diverse text):
+820 tok/s for a 210,038-token prompt (256 s) and 742 tok/s for 518,738 tokens (699 s) on the 1M-config server
+(Nov 21), and 1496 tok/s for 258,338 tokens in 173 s on the 262144 server with the first ~37% of the prompt
+prefix-cached (about 940 tok/s on the uncached remainder — derived, not measured separately).
+
+Notes on the table:
+
+* The baseline used a corpus shuffled by time seed; later rows use a fixed shuffle (seed 1234) with only a salt line
+  differing, so rows 3-5 are comparable with each other, row 2 only approximately.
+* First request after a launch pays JIT compilation: 907 tok/s (40.7 s) for the 36,923-token prompt versus the
+  steady 1725 before Option A; 1826 (20.2 s) before 1931 after Option A. Steady values are the repeat runs.
+* After Option A vs the row before it: +12% (1725 → 1931), +18% (1449 → 1714), +8% (1370 → 1480).
+* 4096 vs Option A: +13% (1931 → 2177), +13% (1714 → 1943), +15% (1480 → 1703).
+* **4096-chunk KV pool: 329,284 tokens, reported concurrency 1.26x at 262144 per request** (329,284 / 262,144 =
+  1.256), against 641,028 tokens / 2.45x at 2048 chunks (641,028 / 262,144 = 2.445). The guard (pool must hold one
+  262144-token request) passed; the concurrency halving is why 4096 is not the production setting.
+* Early long runs (1M-config server, Nov 21): a 493,538-token prompt took 499 s (990 tok/s average); 1255 tok/s at
+  100K (handoff Session 3).
+* The user accepted 1480 tok/s at 241K and 1931 at 32K and closed prefill work.
+
+## 2. Prefill chunk profile (`INKLING_PROF=1`, T=2048, eager, ms per chunk)
+
+| Phase | Before (~30K depth) | After controller GEMM | After sconv tile | After, ~256K depth |
+|---|---|---|---|---|
+| `draft.ctx_kv` | 5 | 5 | 5 | 5 |
+| `pre_attn` | 202 | 68 | 68-69 | 68 |
+| `a.proj` | 28 | 27-28 | 27-28 | 27 |
+| `a.kvconv` | 26 | 26-27 | 11-12 | 11 |
+| `a.norms` | 11 | 11 | 11-12 | 11-12 |
+| `a.core` | 240 (239-246) | 257-258 | 277-278 | **953-960** |
+| `a.wo` | 11 | 11-12 | 11-12 | 12 |
+| `attention` (sum) | 318 | 336-338 | 340-344 | 1018-1024 |
+| `attn_allreduce` | 96 | 93-97 | 93-100 | 96-101 |
+| `attn_sconv` | 53 | 53 | 11-12 | 11 |
+| `pre_mlp` | 98 | 54 | 54-55 | 54 |
+| `moe` (includes the MoE all-reduce) | 651 | 646-648 | 640-642 | 583 |
+| `mlp_sconv` | 54 | 54-55 | 14 | 14 |
+| **`forward_wall`** | **1499** | **1335** | **1253** | **1877** |
+
+At ~256K depth attention core is 960 of 1877 ms (51%).
+
+**The ~550 ms that first looked unattributed** (measured chunk time against MoE + dense + attention + all-reduce
+micro-benchmarks) resolved to: loop-controller / attention-residual mixes `pre_attn` 202 + `pre_mlp` 98 = **300 ms**,
+short convolutions 53 + 54 = **107 ms**, all-reduce **about 100 ms** (the attention all-reduce, 93-97 ms; the MoE
+all-reduce sits inside the `moe` phase). Nothing remained unexplained once the in-engine phase timers were available.
+
+Component cost model used before the PROF split (per 2048-token chunk): tiered MoE 546 ms (11.37 ms x 48 visits);
+dense GEMMs 37 ms (qkvr 0.58 + wo 0.19 = 0.77 ms per visit, 80 TFLOP/s); all-reduce 1.84 ms per call for 9.4 MB, x96 =
+177 ms (decode-size all-reduce 0.02 ms); attention at context 16,000 / 105,000 / 210,000: local layer
+3.56 / 2.61 / 2.60 ms, global layer 12.99 / 44.88 / 85.11 ms (40 local + 8 global visits per chunk = 246 / 463 /
+785 ms). Measured chunk times (2048 / tok/s): 1556 ms at 32K, 1596 ms at 128K, 1798 ms at 241K.
+
+## 3. Component micro-benchmarks
+
+**Prefill kernels (T=2048, real shapes):**
+
+| Item | Before | After |
+|---|---|---|
+| Controller blend, 3 streams | 7.022 ms (stacked per-token kernels) | 1.536 ms (bmm + fused blend/norm, rel err 8.8e-5) |
+| Controller blend, 3 streams, expanded dest | 6.956 | 1.386 |
+| Controller blend, 1 stream | 2.337 | 0.493 |
+| Controller blend, 3 streams, T=300 | 1.033 | 0.226 |
+| Controller blend, 1 stream, T=70 | 0.089 | 0.147 (slower, hence the threshold of 128 tokens) |
+| Short conv, attention shape | 1.971 ms | 0.246 ms (bandwidth floor 0.047) |
+| Short conv, MLP shape (addend + fp32 residual) | 2.013 ms | 0.318 ms |
+| Mix op, 3 queries x 5 states + norm (stacked vs multi-pointer, 1024 columns, 4 warps) | 1.864 | 1.540 |
+| Mix op, 1 query x 5 states + norm | 1.628 | 0.943 |
+| Mix op, 4 queries x 3 states | 1.194 | 0.691 |
+| Mix op, MLP shape | 1.569 | 0.544 |
+| Prefill attention, local / global layer, ctx 16K, tile (64,64,16) -> (128,128,32) | 3.53 / 12.23 ms | 3.35 / 11.05 ms |
+
+Mix-op timings are noisy (the stacked reference varied 1.16-2.4 ms between runs of the same shape).
+
+**Prefill MoE per visit, real routing, T=2048, slower EP rank (48-visit mean):**
+
+| Path | Mean per visit | x48 per chunk |
+|---|---|---|
+| tiered dequant + bmm (before glue restructure) | 11.37 ms | 546 ms |
+| tiered, after the single global slot table | **10.40 ms** | 499 ms |
+| old capacity bucket + Triton overflow | 14.20 ms (14.21 after) | 682 ms |
+| pure Triton in-register dequant | 13.39 ms (13.40 after) | 643 ms |
+
+Worst visit: tiered 12.15 ms (11.08 after), old 19.23, pure Triton 16.86. Device-time split of one tiered visit
+(profiler): bmm 3.737 ms, bf16 dequant 3.574 ms, output-tier kernel 0.657, SITU 0.468, reduce 0.394, fills 0.255,
+zeros 0.244 (about 9.7 ms of device time). Pure-Triton path per kernel: gate/up 6.266 ms, down 3.326 ms (about
+14 TFLOP/s). Pure-Triton config sweep (`INKLING_MOE_CFG`): default stages 16.32 ms; `128,64,64,16,2` 11.78;
+`128,64,64,8,2` **10.66** (vs 11.12 tiered in the same run); `128,64,128,16,2` 11.43; the rest 13.2-27.1 ms.
+Single-visit timings are noisy: later reruns on the same code gave tiered 12.52 / 12.01 ms and the same
+`128,64,64,8,2` config 15.85 / 13.93 ms, which is why the 48-visit means above are the figures to use.
+
+**Matmul ceiling check (E=64, cap=128, K=2304, N=2304, bf16 weights, no dequant):** oneDNN bmm 1.79 ms =
+**48.5 TFLOP/s** (679 MB weights); Triton `tl.dot` best of seven configs 4.66 ms = **18.7 TFLOP/s**
+(`128,64,64,w16,s3`); the others 4.98-8.10 ms (10.7-17.5 TFLOP/s).
+
+**Vendor grouped GEMM, MXFP4 weights (not usable, see DECISIONS §4):** gate/up 1.94 ms = 44.9 TFLOP/s, down
+1.38 ms = 31.6 TFLOP/s (3.3 ms per visit versus 7.3 ms for dequant + bmm); on real counts with fp32 output 2.85 ms.
+
+**FP4 decoder variants:** bit-trick e2m1/e4m3 decoders are exact over all 16 / 256 inputs; 48-visit means tiered
+10.45 (reference) vs 10.52 (fast), pure Triton 13.41 vs 13.49 — no speedup (repeat: 10.43 vs 10.45, 13.33 vs 13.39).
+
+**Decode-size MoE per visit (ms; random top-8 routing, `agents/decode/bench_expert_dtype.py`):**
+
+| | T=1 | T=2 | T=4 | T=8 |
+|---|---|---|---|---|
+| TP2 bf16 / NVFP4 / MXFP8 | 0.323 / 0.192 / 0.217 | 0.413 / 0.169 / 0.188 | 0.519 / 0.262 / 0.305 | 0.946 / 0.516 / 0.578 |
+| TP2 bf16 / NVFP4 | 1.68x | 2.43x | 1.98x | 1.83x |
+| TP1 bf16 / NVFP4 / MXFP8 | 0.288 / 0.165 / 0.185 | 0.524 / 0.262 / 0.310 | 0.928 / 0.539 / 0.580 | 1.609 / 0.978 / 1.065 |
+| TP1 bf16 / NVFP4 | 1.75x | 2.00x | 1.72x | 1.64x |
+
+Effective NVFP4 bandwidth at TP2 T=4 is 261 GB/s against 468 GB/s for bf16 through the same machinery. Split-K
+config sweep (`INKLING_MOEQ_SPLIT`) at T=2/4/8: default 0.172 / 0.292 / 0.490 ms (0.147 / 0.253 / 0.491 for the
+identical explicit default — about 15% noise); no config was better.
+
+## 4. Decode history (single stream unless stated)
+
+| tok/s | What | Source |
+|---|---|---|
+| 2.0 | eager, bf16 experts, first working port | handoff Session 2b |
+| ~9 | eager, native 4-bit experts | Session 2c |
+| 26 | XPU full-decode graphs | Session 2d |
+| 40.4 short / 23.5 at ~494K | 500K server, bf16 KV, graphs, no speculation | Session 3, Nov 21 |
+| 31.4, 41.6 | supplied for this document as the short-context start and an intermediate step; the underlying runs are not in the repo or the handoff log | — |
+| 49.3 | plain decode, TP2 graphs, bf16 KV, later in the Nov 21 session (after the Session 3 changes: fp32 LM head, vendor far-key attention, split-K MoE GEMV) | session record |
+| 184 aggregate / 8 concurrent streams | plain decode, same stack | session record |
+| 22 (TP1) vs 31 (TP2) | decode is not bandwidth/comm bound (31 may be the "31.4" above; not confirmed) | Session 3 |
+| **73.9 mean** | DSpark depth 3, bf16 KV, max-model-len 65,536, `spec_k_bench` 4 classes | Nov 21 |
+| 72.1 mean | same, depth 5 | Nov 21 |
+| **67.3 mean** | depth 3, fp8 KV, max-model-len 1,048,576 server, FP8 dense off | Nov 21 |
+| **66.9 mean** | depth 3, fp8 KV, 262144 server, 2048 chunks | Nov 22 |
+
+Per-class short-context results (`spec_k_bench`, 384-token completions, 2 prompts per class; tok/s, tokens per
+step, step ms):
+
+| Run | prose | facts | chat | code | mean |
+|---|---|---|---|---|---|
+| depth 3, bf16 KV, 64K (Nov 21) | 52.5 | 59.4 | 87.3 | 96.2 | 73.9 |
+| depth 5 | | | | | 72.1 |
+| depth 3, fp8 KV, 1M-config, FP8 dense off | 48.7 / 1.88 / 38.6 | 53.7 / 2.08 / 38.6 | 78.9 / 3.08 / 39.1 | 87.8 / 3.52 / 40.1 | 67.3 |
+| same + FP8 dense, run 1 | 49.4 / 1.81 / 36.6 | 55.7 / 2.04 / 36.6 | 81.6 / 3.00 / 36.7 | 73.5 / 3.22 / 43.8 (jitter) | 65.0 |
+| same + FP8 dense, repeats | 49.5 / 36.5, 49.3 / 36.6 | 55.7 / 36.6, 55.6 / 36.7 | 81.7 / 36.7, 81.4 / 36.8 | 84.5 / 38.1, 85.0 / 37.9 | 67.8, 67.8 |
+| 262144 server, 2048 chunks (Nov 22) | 48.3 / 1.88 / 38.9 | 53.3 / 2.08 / 38.9 | 78.3 / 3.08 / 39.4 | 87.5 / 3.52 / 40.2 | 66.9 |
+
+* The 73.9 (bf16 KV, 65,536 max) vs 67.3 (fp8 KV, 1M-config) difference was never isolated to a cause.
+* The `spec_k_bench` code class showed 62.8 ms and 64.2 ms steps on the first run after two fresh launches and
+  40.2 ms afterwards (and 43.8 ms once); run alone or in other orders code measured 81.5-94.9 tok/s at
+  39.7-40.5 ms. Treated as first-run warm-up (DECISIONS §8).
+* Per-class order test (same server): code 81.9 tok/s (3.25 tok/step, 39.7 ms), code2 94.9 (3.84, 40.5), prose 44.6
+  (1.73, 38.8), chat 77.2 (3.03, 39.3).
+* Step-cost model measured by concurrent decode (TP2, graphs; ms for T tokens): T=1 20.3, T=2 23.9, T=4 30.7,
+  T=8 43.5; draft cost about 4.8 ms. Fixed depth 3 sits at the oracle depth derived from per-position acceptance.
+
+## 5. Long-context decode on repetitive filler text (spec depth 3)
+
+**The tokens-per-step figures in this section come from a repeated filler sentence and overstate real text.**
+The 3.98 tokens/step below was measured on that filler; real documents give about 3.2 (code) and 2.5 (prose),
+section 7.
+
+| Context (tokens) | Build | tok/s | tokens/step | step | Needle |
+|---|---|---|---|---|---|
+| 210,038 | before far-region fold (1M-config, Nov 21) | 15.2 | 3.81 | **249.6 ms** | found |
+| 518,738 | before far-region fold | 4.1 | 2.09 | **515.1 ms** | found |
+| 67,210 | after far fold (Nov 21) | 87.4 | 3.91 | 44.8 ms | found at 67,238 |
+| 134,410 | after far fold | 79.0 | 3.98 | 50.3 ms | found at 134,438 |
+| 220,510 | after far fold | 71.6 | 3.98 | **55.5 ms** | |
+| 258,310 | after far fold | 70.0 | 3.93 | 56.2 ms | found at 258,338 |
+| 258,310 | after draft fold | 73.9 | 3.97 | **53.7 ms** | |
+
+A 940,000-token needle was started and never completed (the client process died); 1M is ruled out regardless.
+Prefix hit rate in the decode calls was 1.000 on every rung and cache-hit overhead 0.3-0.7 s, so the 250 ms was
+neither cache misses nor a non-flash fallback.
+
+**Root cause of 250 ms (found Nov 21):** the vendor flash-attention call for the far region splits the KV sweep only when
+q_len = 1. At 210,000 tokens (215 MB of fp8 KV per layer per card): q_len 1 = 616 us (349 GB/s); q_len 2, 3, 4, 5, 8, 16
+all ~22.5 ms (about 10 GB/s, flat in q_len, so rows do share the sweep but it runs almost serially).
+Fix: fold a request's verify rows into the GQA group dimension (one q_len-1 sweep). T=2: 22,598 → 613 us; T=4:
+22,610 → 845 us (per-row expansion: 1,204 us); T=8: 22,614 → 1,323 us (expansion 2,259 us). Output error vs the old
+path 3.5e-3, LSE error 2.9e-6. Depth gate against an fp32 reference (contexts 64K / 134K / 258K, T=2 and 4):
+fold 2.70e-3 to 2.84e-3, old path 2.28e-3 to 2.37e-3, LSE error 9.5e-7 (fold) vs 1.9e-6 to 3.8e-6 (old).
+Env switch `INKLING_XPU_FAR_FOLD` (default 1).
+
+Context-dependent cost split at the time of the fix (kernel micro-benchmarks): target global
+attention (8 visits) 0.8 / 2.6 / 5.0 ms and drafter global layer 2.3 / 4.8 / 7.9 ms at 67K / 134K / 220K, against a
+measured step growth of 5.8 / 11.3 / 16.5 ms over the ~39 ms short-context step.
+
+## 6. Drafter block attention (global draft layer, bf16 draft KV, one layer)
+
+| Context | Original | Group-fold | Retuned fold |
+|---|---|---|---|
+| 220K | 8.036 ms | 3.442 ms | **2.083 ms** |
+
+Retune (Nov 22) = BN 128, 16 warps, 3 stages, 512 target programs, 128 max splits (`INKLING_DRAFT_*`). Sweep at
+220K: the previous default 3.446 ms; bn 128 / 8 warps 6.222; bn 64 / 4 warps 11.770; bn 128 / 16 warps / 2 stages /
+256 programs 2.124; with 512 programs 2.092; bn 128 / 32 warps 3.563; bn 256 / 16 warps 6.172; bn 256 / 32 warps
+3.195. Correctness test (`test_triton_block_attention.py`) rel error 0.00199-0.00232.
+Effect on the 258K filler step: 56.2 → 53.7 ms (70.0 → 73.9 tok/s) — about half the ~5 ms predicted from the kernel timing.
+The drafter has 3 layers; layers 0 and 2 are local (1024 window), layer 1 reads the full context.
+
+## 7. Acceptance and step time on diverse documents (the numbers that matter)
+
+Context = Python source-file corpus (`agents/deep4.py`); tails: code continuation, prose summary, verbatim quote.
+tokens/step | tok/s | step ms (marginal timing, 256 vs 96 tokens).
+
+| Run | ctx | code | prose | quote |
+|---|---|---|---|---|
+| 4096-chunk server, random salt (Nov 22) | ~1.5K | 3.23 / 78.1 / 41.4 | 2.43 / 65.3 / 37.2 | 3.69 / 94.5 / 39.0 |
+| same | 250,6xx | **3.21 / 63.8 / 50.3** | **2.48 / 54.6 / 45.4** | **2.15 / 41.7 / 51.7** |
+| 2048 server, pre-fusion, random salt | ~1.5K | 3.13 / 80.9 / 38.7 | 2.56 / 80.2 / 31.9 | 3.57 / 94.7 / 37.7 |
+| same | 250,6xx | 3.46 / 63.9 / 54.1 | 2.63 / 58.2 / 45.2 | 2.15 / 40.8 / 52.8 |
+| 2048 server, pre-fusion, `SALT=fx1` | ~1.5K | 3.25 / 91.6 / 35.5 | 2.57 / 76.8 / 33.5 | 3.59 / 90.0 / 39.9 |
+| same | 250,675 | 3.26 / 66.6 / 48.9 | 2.47 / 57.6 / 42.9 | 1.63 / 29.6 / 55.1 |
+| fused build, `SALT=fx1`, launch 1 | ~1.5K | 3.10 / 82.1 / 37.7 | 2.61 / 84.6 / 30.8 | 3.71 / 95.1 / 39.0 |
+| same | 250,675 | 3.27 / 75.0 / 43.6 | 2.55 / 67.2 / 37.9 | 1.80 / 36.8 / 48.8 |
+| fused build, launch 2 | ~1.5K | 3.17 / 81.8 / 38.8 | 2.59 / 77.8 / 33.3 | 3.65 / 97.6 / 37.4 |
+| fused build, launch 3 | ~1.5K | 3.11 / 82.1 / 37.8 | 2.42 / 78.1 / 31.1 | 3.64 / 97.8 / 37.2 |
+
+Ranges across runs: short context code 3.10-3.25, prose 2.42-2.61, quote 3.57-3.71; at ~251K code 3.21-3.46, prose
+2.47-2.63, quote 1.63-2.15. Eager profiling server at 251K reproduced 3.21 / 2.47 / 2.15. **Acceptance holds with
+depth for code and prose; it collapses for verbatim quotation of far-back text (3.69 → 2.15 in the first pair).**
+Hundred-tok/s needs a step of 32.1 ms or less at 3.2 tokens/step (24.8 ms or less at 2.5); the 251K steps above are
+43.6-54.1 ms (code) and 37.9-45.4 ms (prose).
+
+## 8. Quality measurements
+
+| Check | Result | Date |
+|---|---|---|
+| llama.cpp 3-pass oracle, 12 varied prompts (`quality_vs_llamacpp.py`) | 12/12 top-1, mean KL 0.0013 (Session 2c); KL 0.0015 (Session 3) | Nov 21 |
+| Old (original build) vs final, dense FP8 off, fp8 KV | top-1 12/12, mean KL **0.001241**, max 0.005985; greedy prompt 0 identical for 4/24 tokens | Nov 21 |
+| Old vs final with FP8 dense | top-1 12/12, mean KL **0.002394**, max 0.013785 | Nov 21 |
+| FP8 dense vs dense-off on the same config | mean KL 0.002436, max 0.013207 | Nov 21 |
+| Earlier-build dump (before the FP8-dense step) vs final dense-on | mean KL 0.002638, max 0.014145 | Nov 21 |
+| Fold build vs pre-fold build | mean KL 0.000000, greedy identical 24/24 | Nov 21 |
+| After Option A vs original | mean KL 0.001243, max 0.005985 | Nov 22 |
+| Fused-kernel build vs after-A build | mean KL 0.000000, top-1 12/12, greedy identical 24/24 (twice, incl. after the final routing fix) | Nov 22 |
+| KV quantisation simulation (`kv_sim.py`) | TurboQuant-style 4-bit KL 0.0055; naive uniform int4 0.0595; fp8 0.0020 | Nov 21 |
+| Needles through the new prefill kernels (diverse text) | found at 31,865 and 123,306 tokens; after Option A at 31,865 | Nov 21-22 |
+
+The 12 gate prompts are under 128 tokens, so they exercise only decode-size kernels; the fold and the prefill
+kernels were additionally gated by depth needles and kernel-level fp32 reference tests.
+
+## 9. Decode-step kernel profile and dispatch gap (Nov 22)
+
+Method: one-shot torch-profiler capture of a real 4-token verify forward on the eager (graphs off) profiling server
+(`prof.tprof_call`, flag file `agents/tprof_target.flag`); device time of kernels only. One capture per launch.
+Graph-mode step is about 39-41 ms; eager wall for the same forward is 110-111 ms (T=4) / 122 ms (T=8), i.e. launch bound.
+
+| Capture | Positions | Kernels | Device total |
+|---|---|---|---|
+| Before fusion, short | 151-154 | 2342 | **27.94 ms** |
+| Before fusion, depth | 250690-250693 | 2342 | **36.05 ms** |
+| After fusion, short | 155-158 | **1762** | **26.38 ms** |
+| After fusion, depth | 250688-250691 | **1762** | **35.44 ms** |
+| (not comparable) 1.5K context | 1559-1562 | 1762 | 28.56 ms |
+| (not comparable) first step | 26-29 | 1762 | 23.95 ms (near kernel 1.224 ms: only 26 keys of context) |
+| (discarded) T=8 warm-up forward | | 2342 | 41.68 ms |
+
+Largest items, before fusion short (ms, count): `_qg_split` (MoE gate/up) 7.041 x48; dense `gemm` 4.320 x218;
+`_qd_split` (MoE down) 3.962 x48; `_inkling_attn` (near attention) 3.254 x48; all-reduce 1.442 x96; bf16 copy
+kernels 1.052 x194; `_mix` 0.959 x119; `_ctrl_hidden` 0.848; `_sconv` 0.799 x192; `_ctrl_blend` 0.487; router
+scores 0.392; fp32 copies 0.370 x53; `_rows` 0.360 x192; reduce 0.359; router top-k 0.332; `_qg_combine` 0.328;
+concat 0.310 x112; `_wnorm` 0.270; `_sconv_write` 0.255 x192; Memcpy 0.163 x124; `_kv_write` 0.138 x48.
+After fusion short: `_qg_split` 6.827; gemm 4.345; `_qd_split` 3.847; near attention 3.276; all-reduce 1.402;
+`_mix` 0.963; `_ctrl_hidden` 0.851; `_sconv` 0.842; `_ctrl_blend` 0.488; fp32 copies 0.370 x53; concat 0.334 x120;
+bf16 copies **0.312 x50**; `_prep` **0.232 x48**; Memcpy 0.137 x104; `_sconv_write` and `_rows` gone.
+
+Fusion changes (exact; see DECISIONS §10): conv-state write folded into the conv kernel (192 launches, 0.255 ms);
+four `rows_op` + `kv_write` (240 launches, 0.498 ms) → one `_prep` kernel x48 (0.232 ms); bf16 copy kernels 194 → 50
+(1.052 → 0.312 ms). MoE differs by about -0.3 ms at short context and +0.7 ms at depth between captures (routing).
+
+**Context cost in the target forward (device):** before 36.05 - 27.94 = 8.11 ms; after 35.44 - 26.38 = 9.06 ms
+(MoE routing differs between captures). Far attention (vendor fmha, 8 visits) 7.390 + 0.175 ms before and 7.375 +
+0.167 ms after (0.95 ms per visit, about 270 GB/s). Near attention kernel 3.254 → 4.493 ms (before) and 3.276 →
+4.495 ms (after): **+1.2 ms growth with context that fusion does not change**; cause not investigated (suspected
+page-walk cost on far-allocated cache pages).
+
+**Dispatch gap, measured (`agents/graph_gap_bench.py`, `ar_graph_bench.py`):**
+
+| Measurement | Result |
+|---|---|
+| XPU-graph replay of N tiny dependent kernels, N = 100 / 500 / 2000 / 4000 | 1.04 / 0.93 / 0.90 / 0.90 us per kernel (slope 0.90 us) |
+| Same kernels eager | 4.43 / 4.13 / 4.13 / 4.11 us per kernel |
+| 96 decode-size (4 x 2304 bf16) all-reduces in a graph, 2 ranks | 1.615 ms with `VLLM_XPU_ALLREDUCE_HOST_WAIT=1`, 1.625 ms with 0 (eager 1.932 / 1.953 ms) |
+| 96 all-reduces + 960 tiny kernels in a graph | 3.578 ms (HOST_WAIT=1), 3.545 ms (0): about 2.06 us per interleaved tiny kernel |
+
+Implied total dispatch overhead for ~2300 kernels: about 2-4.5 ms; the 580 kernels removed by fusion are worth about
+0.5-1.2 ms of gaps on top of the 1.56 ms of device time. The ~8 ms gap suspected before this measurement was wrong.
+The 96 all-reduces cost 1.6 ms in a graph (17 us each); the full-chunk all-reduce at T=2048 costs 1.84 ms each.
+Graph-step wall-clock before/after fusion could not be resolved (pooled short-context step means 37.2 vs 35.9 ms,
+within the +-2 ms launch noise).
+
+Decode-step composition at short context (target forward 27.94 ms device): MoE 12.4 (gate/up 7.041, down 3.962,
+combine 0.328, router 0.724, reduce 0.359) = 44%; dense GEMM 4.3 = 15%; near attention + KV write + vendor far
+3.6 = 13%; loop mixes/controllers 2.6 = 9%; casts/concat/copies ~2.0 = 7%; all-reduce 1.4 = 5%; conv + rows 1.4 =
+5%. The remaining ~11-13 ms of the ~39-41 ms step is the drafter (1.43 ms of device time on one draft-forward
+capture, taken at a T=8 warm-up shape, so indicative only), LM head and sampling, and dispatch gaps; this remainder
+was not profiled directly.
+
+## 10. Other numbers worth keeping
+
+* One-shot all-reduce (L0 IPC): 18 vs 39 us at 4.6 KB, bit-identical, off by default (`VLLM_XPU_ONESHOT_AR=1`).
+* Vendor flash attention for far keys: prefill 2.6-2.9x (40 TFLOP/s); decode 4-5x at 131K-491K (2.0 ms per layer call
+  at 491K) — handoff Session 3.
+* Fixed per-request KV overhead about 3.4 GiB per rank (conv-state / SWA caches sized for `max_num_batched_tokens`);
+  KV 16 KiB per token per rank in bf16, 8 KiB in fp8.
+* Host memory with the dev server up at this cap: 63 GB used of 91 GB total, swap 7 GB (`free -g`, Nov 21).

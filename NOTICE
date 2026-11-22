@@ -1,0 +1,11 @@
+Inkling 2 Mini on Intel XPU
+Copyright 2026 dndnglmw
+
+This product includes software developed at
+vLLM project (https://vllm.ai/), licensed under the Apache License 2.0.
+Derived from vllm-project/vllm at commit 4c61621b4 (Nov 2026), extended with
+an Intel XPU model package (vllm/models/inkling2/xpu/), Triton kernel suite,
+DSpark drafter port, and a one-shot P2P all-reduce for the XPU communicator.
+
+Quality validation uses llama.cpp (ggml-org/llama.cpp, MIT) as a reference
+oracle via user-run servers; no llama.cpp code is included.
