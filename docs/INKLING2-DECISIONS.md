@@ -129,8 +129,9 @@ numbers, referred to below as PERF-LOG §n). Each entry states the decision, the
   decode kernel already at ~75-95% of achievable bandwidth (the earlier 261-vs-468 GB/s table miscounted
   bytes, skipping w2; the dequant costs ~5% over raw loads), and per-pair re-reads leave only ~2 ms of the
   12.4 against the unique-expert floor, so the "4-5 ms" estimate was optimistic and the item is
-  deprioritized; untried angle remains a vendor bf16-activation FP4 GEMM. Still open: investigating the
-  near-attention growth, a real TurboQuant-style KV format (only simulated:
+  deprioritized; untried angle remains a vendor bf16-activation FP4 GEMM. the near-attention growth was CLOSED Nov 22 - a controlled scatter A/B (fresh vs fully-churned
+  free-queue, same 134K context) showed zero effect and the original anomaly did not reproduce
+  (launch noise, PERF-LOG section 15), a real TurboQuant-style KV format (only simulated:
   4-bit KL 0.0055 vs uniform int4 0.0595 vs fp8 0.0020), a bf16-activation FP4 kernel in a vendor/SYCL library, and
   larger prefill chunks without the capacity loss.
 * **Power efficiency analysis** (section 12): tokens-per-second-per-watt and the serialisation cost are not recorded.
@@ -259,3 +260,15 @@ gate in vllm/config/vllm.py to include XPU - shows the step bracket at p50 34.4 
 wall: the device bracket covers the whole step and there is no large host-side gap to reclaim. Decode
 is device-work-bound end to end; what remains is small kernel work (LM head + sampling graph coverage,
 ~1-2 ms) and the near-attention growth (~1 ms). Detail: PERF-LOG section 14.
+
+
+## 16. Remaining-lever audit closures (Nov 22)
+
+- Near-attention scatter fix: closed, zero measured effect (see PERF-LOG section 15).
+- Vendor oneDNN FP4 GEMM: capability confirmed in the bundled build (v3.13.3, nvfp4 symbols in
+  libtorch_xpu.so), still parked - no Python path, layout repack + C++ binding for <=~2 ms.
+- Free-queue sorting / block-size changes: not pursued (scatter result makes them pointless).
+- Decode-latency campaign status: every millisecond of the 34.4 ms step bracket is attributed; remaining
+  open item is only the eager-tail gap measurement gating LM-head+sampling graph coverage (~1-2 ms best
+  case). The larger real levers are outside serving: drafter retraining (+14-38%) and throughput mode
+  (1.6-1.7x at 2 streams).

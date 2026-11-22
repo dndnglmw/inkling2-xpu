@@ -548,3 +548,42 @@ rows) - the "shard the head" lever does not exist. The consult's host-sync suspi
 the forward/accept path (device-side sampling kernels); the one per-step sync cluster
 (async_utils.py:193 copy_event.synchronize + tolist) runs on the async output path, and wall ~= elapsed
 shows it is not costing visible time.
+
+
+## 15. Remaining-lever audit: scatter, FP4, throughput, ceiling, Qwen first pass (Nov 22)
+
+**Near-attention scatter: closed.** Controlled same-boot A/B at a 134K context (GPU-event elapsed,
+TIMING=1): ARM A fresh pool (contiguous block ids, p50 40.0 / min 39.4 / p90 40.2, n=61) vs ARM B pool
+churned past full turnover (scattered ids via four distinct ~120K prefills; final-run p50 39.9 /
+min 39.4 / p90 40.2, n=64 - churn-decode lines excluded). Block-id scatter has ZERO effect on the
+near-attention step cost. The earlier "+1.2 ms on full VRAM" anomaly did not reproduce and falls within
+the long-context launch-noise band (section 13); it was a cross-boot comparison, the protocol that
+finding invalidates. Free-queue-sorting is not worth pursuing. (Note: arm stats must be computed on the
+final run's lines only - churn decodes contaminate the raw capture.)
+
+**Vendor FP4 GEMM: capability confirmed, parked.** Bundled oneDNN is v3.13.3; strings on
+libtorch_xpu.so show 2827 f4-type + 24 nvfp4 symbol hits - the primitives physically exist in the XPU
+build. But there is no Python path, and the kernel's custom layout (u8 packed nibbles with per-16 scale
+bytes interleaved) does not match oneDNN's separate-scale-tensor model: a repack plus a C++/SYCL binding
+for at most ~2 ms. Parked with the evidence recorded.
+
+**Throughput headroom (for future reference):** two concurrent deep4 streams at 8K aggregate
+1.6-1.7x single-stream tok/s (code 152 vs 90, prose 158 vs 95, verbatim 172 vs 108), per-stream latency
+-10-35%. Matches the KV pool's 1.68x concurrency design point. Single-stream latency remains the
+production goal; this documents the mode switch if needs change.
+
+**Drafter-retraining ceiling (if ever on the table):** at ~3.75 tok/step the same step cost yields
++14% code / +38% prose / +5% verbatim tok/s; a perfect 4.0 yields +20/45/10%. Prose has the most
+headroom (2.72 of 4.0). Model-training work, not serving work.
+
+**Qwen head-to-head, first pass:** identical deep4 prompts (SALT-pinned, raw /v1/completions,
+temperature 0, 256 tokens) against production Inkling (2x B65 TP2) and a Qwen3-4B-Instruct-2507 Q4_K_M
+llama.cpp CPU oracle (4 threads, :8099). Quality: code-continue parity (both produce correct
+ConfigLoader continuations); verbatim-quote both accurate (Inkling's output format cleaner);
+prose-summary both partial-but-accurate over the 3-file corpus window - Inkling summarized the oauthlib
+tokens.py file (third in window, corpus check confirmed the module is really there), Qwen the first
+punycode file; neither hallucinated. No cutover signal. Speed is not comparable (GPU+spec-decode vs
+CPU oracle): Inkling 36.6-69.2 tok/s on cached-prompt 256-token requests vs Qwen 6.6. Caveats: CPU
+oracle, raw completions on a chat-tuned model, 3 prompts - a broader suite would be needed to claim
+parity beyond the signature tasks. Qwen gguf downloaded from the ungated unsloth mirror (the official
+Qwen GGUF repo path returns 401 ungated).
