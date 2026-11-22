@@ -624,3 +624,29 @@ before writing; (c) one-off patch scripts must refuse to run when a backup alrea
 to patch_xtrace.py). Post-incident checklist executed clean: gpu_worker.py byte-identical to pristine,
 zero flag/trace leftovers, the intentional config gate intact (config/vllm.py:645), no leftover
 containers, fork working tree clean apart from the intentional gate line.
+
+
+## 17. System DRAM accounting deep-dive (Nov 22, Claude agent diagnostic)
+
+Follow-up to section 12's mirror finding: a full read-only diagnostic (Claude agent with Bash, no state
+changes) reconciled the complete DRAM picture while serving. MemTotal 91.14 GiB: used 75.1 (the mirror
+counts inside "used" and is NOT reclaimable - GPUReclaim 0, MemAvailable excludes it), MemFree 3.87,
+MemAvailable 16.06, GPUActive mirror 57.7 (stable vs 58.4 earlier), Cached 12.7 (model files,
+reclaimable), AnonPages 14.5, Slab 0.8. Reconciliation: free+cached+anon+slab ~= 32 GiB + 57.7 mirror
+= total; used minus mirror ~= 17.4 GiB = AnonPages + kernel + ~2 GiB unattributed residual (not
+alarming). Per-process top: TP workers 5.77 + 5.75, llama oracle 3.18 (2.3 of it reclaimable GGUF mmap),
+api_server 2.11, EngineCore 1.87 - the mirror (57.7) is ~3x all process anon memory combined and no
+process owns it (kernel-side xe/TTM pages).
+
+Levers inspected (none adopted): xe module params expose no GTT/mirror-size knob (wedged_mode is debug;
+the rest risk driver stability); vm.overcommit_memory=0 is fine and mode 2 would break vLLM; no zram;
+8 GiB swap file (2.8 used, 5.2 free, swappiness 10) absorbs anon only, never the mirror; docker cgroup
+has NO memory cap (Memory=0) - a cap would convert VRAM spikes into container kills, correctly absent.
+
+Risk verdict: expected-per-the-mirror, steady state safe (PSI memory 0.00 across all windows, swap
+mostly cold). OOM failure mode under real pressure = the OOM killer picks the largest anon process =
+a vLLM worker = production loss; headroom is 16 GiB available + 5.2 swap. A 234K prefill spike adds
+mirror-bounded host DRAM (activations on-card) - empirically fine all day (multiple 234K runs, zero
+pressure events), though GPUActive was not logged DURING a spike. Insurance options if ever wanted
+(maintenance-window changes, not done): larger swap file or zram for the anon side. The mirror itself
+remains the documented cost of the ~61 GiB sizing rule - not wasteful, not fixable, not dangerous.

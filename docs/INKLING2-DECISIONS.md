@@ -285,3 +285,12 @@ PERF-LOG section 16 with a safe redesign (bounded with-block, one step-pair, off
 pti/unitrace). The expected gain does not justify another production-affecting window. The decode
 optimization campaign is CLOSED: every millisecond of the step is attributed, every lever measured,
 adopted, or parked with recorded evidence.
+
+
+## 18. System DRAM: leave as is (Nov 22)
+
+Full accounting (PERF-LOG section 17) confirms the mirror finding: GPUActive 57.7 GiB is kernel-side,
+unreclaimable, and the dominant term; process anon memory is ~17 GiB; headroom 16 GiB available + 5 GiB
+swap with PSI at zero. No legitimate xe/driver knob reduces the mirror; overcommit mode 2 would break
+vLLM; a container memory cap would be harmful. Verdict: expected-per-the-mirror, not wasteful, not
+dangerous - no change. Optional insurance (bigger swap or zram) noted for a maintenance window only.
