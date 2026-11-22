@@ -587,3 +587,40 @@ CPU oracle): Inkling 36.6-69.2 tok/s on cached-prompt 256-token requests vs Qwen
 oracle, raw completions on a chat-tuned model, 3 prompts - a broader suite would be needed to claim
 parity beyond the signature tasks. Qwen gguf downloaded from the ungated unsloth mirror (the official
 Qwen GGUF repo path returns 401 ungated).
+
+
+## 16. Tail-gap instrument incident, and campaign closure (Nov 22)
+
+**Incident.** The last open item (eager-tail gap measurement gating LM-head+sampling graph coverage)
+used a worker-level torch.profiler capture: a flag-armed decorator pair on gpu_worker.py
+(Worker.execute_model / Worker.sample_tokens), profiler entered at execute_model call 50 and exported
+after 3 sample_tokens returns. Outcome: attempt 1's verification step crashed AFTER the edit landed
+(py_compile writing into a root-owned __pycache__; fixed to an in-memory compile check) leaving the
+patch in place silently; attempts 2-3 hit an HTTP 500 on the second same-prompt decode request in
+patched windows 2/2 (never in unpatched windows, 2/2 clean the same day), with only ~41-45
+execute_model calls per worker and no server-side traceback found in filtered greps; the subsequent
+restoreprod restarted production ON THE PATCHED FILE (restoreprod does not revert source) with the
+leftover flag present - production's first request then hung until timeout. Mechanism (per consult,
+plausible not proven): the leftover flag armed the profiler inside production at call 50; a stuck XPU
+profiler sync blocks one rank while the other waits in a collective - a silent hang. Emergency revert
+(pristine file + flag deletion + restart) restored service; deep4 bands normal (94.9/89.8/106.2 tok/s
+at 8K). The 500's root cause remains unexplained: decorator-introspection, stdout-print and flag-read
+hypotheses were knocked down by source reads; the patch correlation stands (2/2 vs 0/2). Declared not
+worth further production windows.
+
+**Closure.** The campaign closes on measured arithmetic: decode bracket p50 34.4 ms ~= wall;
+draft 0.4 ms; LM-head bmm floor 0.790 ms/rank at 586 GB/s weight-stream (measured at the exact
+production shape); tail (head + logits all-gather + sampler + accept + gaps) <= ~2.6 ms worst case,
+likely 1.5-2 ms. The graph-coverage idea is PARKED per the pre-set 0.5 ms gap gate - the gap component
+could not be measured without re-running the risky instrument, and the bounded upside cannot change any
+decision. If ever revisited: a bounded `with profile(...)` around ONE execute_model+sample_tokens pair
+in an off-production window (separate port/container), never `__enter__` across steps, unfiltered logs,
+or the pti/unitrace route instead.
+
+**Process lessons (extending section 13's rules):** (a) source patches SURVIVE production restarts -
+verify SOURCE STATE (cmp against backup / grep), not just container env, before trusting any window;
+(b) verification that writes to root-owned paths fails after the edit has landed - verify in memory or
+before writing; (c) one-off patch scripts must refuse to run when a backup already exists (guard added
+to patch_xtrace.py). Post-incident checklist executed clean: gpu_worker.py byte-identical to pristine,
+zero flag/trace leftovers, the intentional config gate intact (config/vllm.py:645), no leftover
+containers, fork working tree clean apart from the intentional gate line.

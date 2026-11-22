@@ -272,3 +272,16 @@ is device-work-bound end to end; what remains is small kernel work (LM head + sa
   open item is only the eager-tail gap measurement gating LM-head+sampling graph coverage (~1-2 ms best
   case). The larger real levers are outside serving: drafter retraining (+14-38%) and throughput mode
   (1.6-1.7x at 2 streams).
+
+
+## 17. LM-head + sampling graph coverage: PARKED (Nov 22)
+
+The last candidate lever (~1-2 ms) is parked. Arithmetic bounds the entire eager tail (LM head +
+logits all-gather + sampler + accept + gaps) at <= ~2.6 ms worst case against the 34.4 ms bracket
+(draft 0.4, head floor 0.790 measured at 586 GB/s), and the gap component - the only part graphing
+removes - could not be measured: the profiling instrument caused an incident (two HTTP 500s in patched
+windows, one production hang via a leftover flag + persistent source patch) and is documented in
+PERF-LOG section 16 with a safe redesign (bounded with-block, one step-pair, off-production window, or
+pti/unitrace). The expected gain does not justify another production-affecting window. The decode
+optimization campaign is CLOSED: every millisecond of the step is attributed, every lever measured,
+adopted, or parked with recorded evidence.
