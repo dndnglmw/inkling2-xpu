@@ -196,3 +196,35 @@ across launches (section 8).
   stack at the 262144 cap. The residual inefficiency is attributed to the serialized draft/verify phases
   (the DSpark draft pass runs serially with the target pass), which raise per-token energy over a single
   fused pass.
+
+## 13. Speculative A/B and the KV-cache dtype call (Nov 22)
+
+* **method:"mtp" is not wired for Inkling2 - rejected as an A/B arm.** Both `--speculative-config
+  {"method":"mtp"}` probes (with and without a draft model path) fail at startup:
+  `Value error, The Inkling2 checkpoint has no mtp_config`. Mechanism: the draft-config loader rewrites any
+  `inkling2`/`inkling2_loop` draft config into an `Inkling2DSparkConfig` unconditionally (vllm/config/speculative.py),
+  and the fork's classic-MTP path expects chain weights (e_proj/h_proj/enorm/hnorm) that this checkpoint family
+  does not ship - its `mtp.safetensors` is a DSpark-stage head (main_proj/markov_head/confidence_head). Only
+  Inkling-1 has an MTP implementation (`inkling_mtp`). Wiring plain MTP for Inkling2 would mean writing a new
+  chain-MTP draft model, not a config change. The planned DSpark-vs-MTP A/B became the depth sweep below.
+* **Speculative depth: keep 3.** Depth 4 wins code (+11% at 234K) but collapses prose (51.1 vs 66.7 tok/s,
+  acceptance 2.48 vs 2.74 tok/step, ~49 ms steps); depth 2 loses 10-20% across the board. Data in PERF-LOG
+  section 11.1. Open observation: depth 4's per-step acceptance falling below depth 3's on identical prompts.
+* **FP8 KV cache: rejected for production; production switched to BF16 KV.** Live FP8-KV vs BF16-KV (deterministic,
+  reproduced byte-identically across two capture pairs): mean KL 0.318 over shared top-20 mass (gate <= 0.002,
+  ~160x over), top-1 agreement 443/576, greedy text 7/12, max position KL 16.58. Needle retrieval unaffected
+  (FOUND at 61K/124K/243K on both). The kv_sim fp8 prediction (0.0020) missed by ~160x - sim numbers do not
+  validate the real path on this stack. BF16 KV is also faster (234K code 77.2 vs 68.5 tok/s, step 44.4 vs
+  48.0 ms, prefill ~7% faster); its only cost is the KV pool: 640,939 -> 439,959 tokens (2.45x -> 1.68x
+  concurrency at the 262144 cap). Accepted. (The earlier "bf16 far KV = Option C rejected" decision concerned
+  doubling the FAR-path KV only, at the old 2x-256K operating point; this decision is the full-cache dtype.)
+* **FP8-KV fix plan: live-validate TurboQuant, then implement packed tq4 KV if it passes.** The sim (Nov 21)
+  had TurboQuant-style tq4 at KL 0.0055 vs naive int4 0.0595; today's lesson is that only live numbers count.
+  Suspected root cause of the FP8 failure: unit-scale e4m3 on unnormalized values (`use_value_norm_no_gamma`);
+  a Hadamard rotation + Lloyd-Max codebook addresses exactly that. If live tq4 quality holds, implement a real
+  packed 4-bit KV (fused Hadamard+codebook in the attention kernel) for ~2x the FP8 pool at near-reference
+  quality - owned end-to-end in this port's Triton kernels. A cheaper intermediate: per-head (calibrated)
+  FP8 scales instead of the unit-scale clip.
+* **Acceptance is launch-deterministic on this stack:** same dtype across launches = 576/576 top-1 agreement,
+  KL 0.00000, 12/12 greedy text (both dtypes). Cross-dtype or cross-depth differences are therefore real
+  effects, not noise.

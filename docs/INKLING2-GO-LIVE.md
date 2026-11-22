@@ -6,6 +6,13 @@ Written 2026-11-22 from the session record. Companion documents:
 `SETUP/inkling2-switch.md` is the **pre-cutover** switch note (written 2026-11-21 when nothing was
 activated); where it disagrees with this file, this file wins.
 
+> **Revision 2026-11-22 (later the same day): production switched from FP8 KV to BF16 KV.** The unit's
+> `EXTRA_ARGS` no longer contains `--kv-cache-dtype fp8` (description now says BF16 KV). Drivers, all measured
+> (PERF-LOG section 11): live FP8 KV failed the quality gate by ~160x (mean KL 0.318 vs <= 0.002, top-1
+> 443/576, greedy text 7/12, deterministic across launches) AND BF16 was faster (234K code 77.2 vs 68.5 tok/s,
+> step 44.4 vs 48.0 ms, prefill ~7% faster); the sole cost is the KV pool, 640,939 -> 439,959 tokens
+> (2.45x -> 1.68x concurrency). Sections below describe the FP8-era configuration where not updated.
+
 > **Read this first — what this document could and could not verify.**
 > The author of this pass had read access to the repo and `/home/operator/work/` only. The installed
 > `inkling2-prod.service`, the OpenCode config, and the power measurements live outside that.

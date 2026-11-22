@@ -17,8 +17,8 @@ the *original* 4-bit checkpoint (no requantisation).
 | | |
 |---|---|
 | Prefill | 1931 / 1714 / 1480 tok/s at 37K / 125K / 230K-token prompts (diverse text) |
-| Decode | DSpark depth 3, ~74 tok/s mean short context; ~64 (code) / 55 (prose) at 250K |
-| Context | 262,144-token cap; fp8 KV; needle retrieved at 258K; KV pool 641K tokens (2.45× concurrency) |
+| Decode | DSpark depth 3, ~100 tok/s mean short context; 77 (code) / 59 (prose) at 234K |
+| Context | 262,144-token cap; BF16 KV (live FP8 KV rejected: KL 0.318 vs 0.002 gate); needle retrieved at 243K; KV pool 439,959 tokens (1.68× concurrency) |
 | Weights | 8.9 GiB per card — native NVFP4 (layers 0–19) + MXFP8 (20–23), dequantised in-kernel |
 | Quality | 12/12 top-1 agreement with a llama.cpp 3-pass oracle, mean KL 0.0013 |
 | Graphs | XPU full-decode graphs (sizes 1, 2, 4, 8) incl. the DSpark verify step |

@@ -9,7 +9,7 @@ Where two figures disagree, both are given with their sources.
 * Hardware: 2x Arc Pro B65, tensor parallel 2. GPU0 is on PCIe Gen5 x16 (46-57 GB/s measured), GPU1 on a PCIe Gen4
   x4 link (7 GB/s measured) (`INKLING2_XPU_HANDOFF.md` Session 3).
 * Model: native NVFP4 experts (layers 0-19) and MXFP8 (layers 20-23), rest bf16; weights 8.9 GiB per card.
-* "Clean server" = container `inkling2-tp2` from `~/work/serve-noprof.sh`: max-model-len 262144,
+* "Clean server" = container `inkling2-tp2` from `/home/operator/work/serve-noprof.sh`: max-model-len 262144,
   max-num-seqs 8, 2048-token chunks, gpu-memory-utilization 0.85, prefix caching on, XPU decode graphs
   (sizes 1,2,4,8), `--kv-cache-dtype fp8`, DSpark depth 3. Deviations are stated per table.
 * Dates: Nov 21 = the daytime work (up to and including the 1M-context pass and the far-region fold);
@@ -339,3 +339,70 @@ was not profiled directly.
 * Fixed per-request KV overhead about 3.4 GiB per rank (conv-state / SWA caches sized for `max_num_batched_tokens`);
   KV 16 KiB per token per rank in bf16, 8 KiB in fp8.
 * Host memory with the dev server up at this cap: 63 GB used of 91 GB total, swap 7 GB (`free -g`, Nov 21).
+
+## 11. Speculative-depth sweep and KV-cache dtype A/B (Nov 22)
+
+Method: `agents/deep4.py` on fixed prompts (corpus from the vLLM source tree, `SALT=7`, byte-identical across
+cells and runs), 3 server launches per cell, marginal tok/s over the 96-to-256-token window, tokens/step from
+the live `vllm:spec_decode_*` metrics. Contexts 8K and ~234K (`ctx` column = actual prompt tokens). Tables quote
+runs 2-3 (steady state); a cell's first 234K run after the cold prefill shows ~8-9 ms lower step times on some
+tails (cache/pool not yet resident) and 8K verbatim run-1 shows a one-off ~260-300 tok/s warmup burst.
+Quality: `agents/ab_quality.py` (12 diverse prompts, greedy 48 tokens with top-20 logprobs per position +
+needle retrieval at ~61K/124K/243K), compared offline by `agents/ab_compare.py`.
+
+### 11.1 DSpark depth sweep (FP8 KV)
+
+tok/s (tok/step, step ms), mean of steady runs:
+
+| tail | ctx | no spec | depth 2 | depth 3 (prod) | depth 4 |
+|---|---|---|---|---|---|
+| code | 8K | 43.8 (1.00, 22.9) | 69.7 (2.57, 36.9) | 84.5 (3.33, 39.4) | 87.1 (3.77, 43.2) |
+| prose | 8K | 44.0 (1.00, 22.8) | 65.2 (2.36, 36.3) | 73.2 (2.72, 37.2) | 75.1 (2.97, 39.6) |
+| verbatim | 8K | 43.9 (1.00, 22.8) | 81.6 (2.77, 34.0) | 96.0 (3.54, 36.9) | 100.3 (3.96, 39.5) |
+| code | 234K | 36.3 (1.00, 27.5) | 58.7 (2.65, 45.2) | 68.5 (3.29, 48.0) | 76.0 (3.85, 50.6) |
+| prose | 234K | 36.3 (1.00, 27.5) | 59.9 (2.32, 38.7) | 66.7 (2.74, 41.1) | 51.1 (2.48, 48.6) |
+| verbatim | 234K | 36.2 (1.00, 27.6) | 42.2 (1.63, 38.7) | 38.7 (1.80, 46.3) | 41.4 (1.76, 42.4) |
+
+Findings: depth 3 confirmed for production - depth 4 wins code (+11% at 234K) but collapses prose (51.1 vs
+66.7 tok/s; per-step acceptance 2.48 vs 2.74 while step time grows to ~49 ms), reproducible across all 3 runs.
+Note: no-spec step at 234K is 27.5 ms (22.8 ms at 8K) - the "base step 37-41 ms" quoted in earlier sections
+was the WITH-spec verify step, not the autoregressive base. Depth 4's prose acceptance falling BELOW depth 3's
+on identical prompts is an open observation (draft feedback through verification changes the chain context).
+Method:"mtp" is not wired for Inkling2 - both probes fail at startup with
+`Value error, The Inkling2 checkpoint has no mtp_config` (the draft-config loader rewrites any
+inkling2/inkling2_loop draft into an Inkling2DSparkConfig unconditionally; there is no chain-MTP draft
+implementation for this family). The planned DSpark-vs-MTP A/B therefore became this depth sweep.
+
+### 11.2 KV-cache dtype: FP8 vs BF16 (DSpark depth 3)
+
+Quality (12 short prompts, 576 greedy positions; two independent capture pairs gave byte-identical numbers):
+
+| metric | FP8 KV vs BF16 KV (reference) | gate |
+|---|---|---|
+| top-1 agreement | 443/576 (76.9%) | 12/12-class |
+| mean KL, shared top-20 mass | 0.31800 | <= 0.002 (~160x over) |
+| max KL | 16.58 | <= 0.014 |
+| greedy 48-token text identical | 7/12 | - |
+| needle recall 61K / 124K / 243K | FOUND on both dtypes; 243K answer identical | - |
+
+Launch-noise control: same dtype across separate launches = 576/576 top-1, KL 0.00000, 12/12 text (both BF16
+and FP8 pairs) - the XPU serving path is deterministic at temperature 0, so the shift above is entirely the
+FP8 KV cache. The kv_sim prediction (fp8 0.0020, Nov 21) missed the live error by ~160x.
+
+Performance (dspark depth 3, mean of steady runs):
+
+| | FP8 KV | BF16 KV |
+|---|---|---|
+| 8K code / prose / verbatim tok/s | 84.5 / 73.2 / 96.0 | 94.1 / 93.1 / 114.3 |
+| 234K code / prose / verbatim tok/s | 68.5 / 66.7 / 38.7 | 77.2 / 58.8 / 45.6 |
+| 234K code step | 48.0 ms | 44.4 ms |
+| ~250K prefill (needle call) | 151.7-156 s | 140.8-146 s |
+| KV pool / concurrency @262144 | 640,939 / 2.45x | 439,959 / 1.68x |
+
+BF16 KV is faster everywhere except prose at 234K (-12%: the drafter's acceptance shifts from 2.74 to 2.35
+tok/step under the changed numerics - the DSpark head was effectively tuned while FP8-KV noise was present).
+The "fp8 halves far-attention bytes" advantage did not materialise: the fp8 path's dequant/staging overhead
+exceeds its bandwidth saving on this port.
+
+**Production switched to BF16 KV on Nov 22** (unit `EXTRA_ARGS` no longer sets `--kv-cache-dtype`; verified
+pool 439,959 tokens, 1.68x concurrency). Sole cost: concurrency 2.45x -> 1.68x.
