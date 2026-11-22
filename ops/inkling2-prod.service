@@ -1,0 +1,20 @@
+[Unit]
+Description=Inkling 2 Mini production server (TP2, 262144 cap, FP8 KV, dspark-3) - owns :8000
+After=docker.service
+
+[Service]
+Type=simple
+Environment=PORT=8000
+Environment=MAX_MODEL_LEN=262144
+Environment=MAX_NUM_SEQS=8
+Environment=MAX_BATCHED_TOKENS=2048
+Environment=GPU_UTIL=0.85
+Environment=PREFIX_CACHING=1
+Environment=GRAPH=1
+Environment="EXTRA_ARGS=--kv-cache-dtype fp8 --speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":3,\"model\":\"/work/models/inkling-xpu4-spec\"}"
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "dockerd not ready" >&2; exit 1'
+ExecStart=/bin/bash "/home/operator/Documents/Default Project/SETUP/serve-inkling2-tp2.sh"
+Restart=no
+
+[Install]
+WantedBy=default.target

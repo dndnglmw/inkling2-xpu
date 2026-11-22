@@ -3,14 +3,16 @@
 Written 2026-11-22 from the session record. Companion documents:
 `SETUP/INKLING2-PERF-LOG.md` (every measured number) and `SETUP/INKLING2-DECISIONS.md`
 (decisions, rejected ideas, limitations, what is not done).
-The pre-cutover switch note (written 2026-11-21, before anything was activated) compared against the
-previous production model and is not published here; this file is the operational record.
+`SETUP/inkling2-switch.md` is the **pre-cutover** switch note (written 2026-11-21 when nothing was
+activated); where it disagrees with this file, this file wins.
 
 > **Read this first — what this document could and could not verify.**
-> The author of this pass had read access to the repo and `~/work/` only. The installed
+> The author of this pass had read access to the repo and `/home/operator/work/` only. The installed
 > `inkling2-prod.service`, the OpenCode config, and the power measurements live outside that.
-> Everything below marked **NEEDS INPUT** was not available and is deliberately left unfilled
-> rather than reconstructed from memory. Everything not so marked was read from a file or measured.
+> Items originally marked **NEEDS INPUT** (installed unit, OpenCode block, power figures) were filled in
+> on 2026-11-22 from the live files and the session record. The output-16384 rationale was stated by the
+> user at the cutover and is not recorded verbatim anywhere, so it stays out. Everything not so marked
+> was read from a file or measured.
 
 ## 1. What is running
 
@@ -20,7 +22,7 @@ previous production model and is not published here; this file is the operationa
 | Hardware | 2x Intel Arc Pro B65, tensor parallel 2 | |
 | Checkpoint served | `/work/models/inkling-xpu4` (= `~/work/models/inkling-xpu4`): native NVFP4 experts (layers 0-19), MXFP8 experts (layers 20-23), everything else bf16; weights 8.9 GiB per card | `INKLING2_XPU_HANDOFF.md` Session 2c |
 | Drafter | DSpark, `/work/models/inkling-xpu4-spec` (keeps `mtp_config` + `mtp.safetensors`), `num_speculative_tokens=3` | `serve-noprof.sh` |
-| Code | `~/work/vllm`, branch `pr-inkling2-mini`, bind-mounted at `/work/vllm`; the image `inkling2-xpu:dev` carries only the Python environment | `SETUP/serve-inkling2-tp2.sh` |
+| Code | `/home/operator/work/vllm`, branch `pr-inkling2-mini`, bind-mounted at `/work/vllm`; the image `inkling2-xpu:dev` carries only the Python environment | `inkling2-switch.md` |
 | Container name (dev/clean launcher) | `inkling2-tp2` | `serve-inkling2-tp2.sh` (`NAME`) |
 | Context cap | `--max-model-len 262144` (fixed; 1M is ruled out, see DECISIONS §7) | |
 | KV cache | `--kv-cache-dtype fp8` (unit-scale e4m3) | |
@@ -33,16 +35,42 @@ previous production model and is not published here; this file is the operationa
 
 ### 1.1 `inkling2-prod.service`
 
-**NEEDS INPUT.** The installed unit is not in the repo (`SETUP/systemd-user/` holds the previous
-production stack's units, but no `inkling2-prod.service`) and is outside the directories the author
-could read. To complete this section, copy the installed unit into the repo and paste
-it here verbatim, including every `Environment=`, `ExecStart=`, `ExecStartPre=`, `Conflicts=` line and any
-drop-ins (`systemctl --user cat inkling2-prod.service`).
+Filled in 2026-11-22: the installed unit was read directly and a copy is committed at
+`SETUP/systemd-user/inkling2-prod.service`. Verbatim as installed at `~/.config/systemd/user/inkling2-prod.service`:
+
+```ini
+[Unit]
+Description=Inkling 2 Mini production server (TP2, 262144 cap, FP8 KV, dspark-3) - owns :8000
+After=docker.service
+
+[Service]
+Type=simple
+Environment=PORT=8000
+Environment=MAX_MODEL_LEN=262144
+Environment=MAX_NUM_SEQS=8
+Environment=MAX_BATCHED_TOKENS=2048
+Environment=GPU_UTIL=0.85
+Environment=PREFIX_CACHING=1
+Environment=GRAPH=1
+Environment="EXTRA_ARGS=--kv-cache-dtype fp8 --speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":3,\"model\":\"/work/models/inkling-xpu4-spec\"}"
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "dockerd not ready" >&2; exit 1'
+ExecStart=/bin/bash "/home/operator/Documents/Default Project/SETUP/serve-inkling2-tp2.sh"
+Restart=no
+
+[Install]
+WantedBy=default.target
+```
+
+Deltas from the pre-cutover draft `SETUP/inkling2-tp2.service.example`: the installed unit has **no
+`Conflicts=`** (nothing stops tp2-prod automatically - keep it disabled while Inkling owns :8000) and
+**`Restart=no`**: if the container dies the unit stays down and :8000 must be brought back by hand
+(`systemctl --user restart inkling2-prod.service`); it does not self-heal. The `Environment=` lines select
+the serve-script knobs documented in section 1.
 
 What the repo does contain, so the reader can compare:
 
 * `SETUP/inkling2-tp2.service.example` — the draft unit written before the cutover
-  (`Conflicts=` with the units that own :8000, `Restart=always`, `RestartSec=15`,
+  (`Conflicts=tp2-prod.service tp2-prod-r304.service`, `Restart=always`, `RestartSec=15`,
   `ExecStart=/bin/bash "…/SETUP/serve-inkling2-tp2.sh"`, log appended to `/tmp/inkling2-tp2.log`).
   Whether the installed `inkling2-prod.service` matches it is **not verified**.
 * The environment the launcher script itself sets inside the container (this is what any unit that calls
@@ -93,59 +121,111 @@ Optional behaviour switches read by the model code (all default as listed; none 
 | `INKLING_PROF` | unset | per-phase timers / one-shot kernel profiler (profiling servers only) |
 | `INKLING_XPU_TORCH_{ATTN,CONV,MOE,LOOP}` | 0 | select the torch reference paths |
 
-## 2. Rollback to the previous production stack
+## 2. Rollback to tp2-prod (Qwen3.8)
 
-The previous production stack (model, launcher, systemd unit) is internal to the author's machine and not
-part of this repo; only the mechanics that concern Inkling are recorded here. **The Inkling unit name must
-be confirmed against the installed unit (NEEDS INPUT, §1.1).**
+Derived from `SETUP/inkling2-switch.md` and `SETUP/systemd-user/tp2-prod.service`; the Inkling unit name is
+confirmed against the installed unit (§1.1, filled 2026-11-22).
 
 ```bash
 # 1. stop Inkling (frees :8000 and both GPUs)
-systemctl --user stop inkling2-prod.service        # confirm the real unit name
+systemctl --user stop inkling2-prod.service        # unit name confirmed (section 1.1)
 docker rm -f inkling2-tp2 2>/dev/null              # the container the launcher creates
-# 2. start whatever unit normally owns :8000 on this host
+# 2. bring Qwen back
+systemctl --user start tp2-prod.service            # tp2-prod-r304.service if that was the active Qwen unit
 # 3. check
 curl -sf localhost:8000/health && curl -s localhost:8000/v1/models
 ```
 
 Notes that matter during a rollback:
 
-* Clients moved to model name `inkling2-mini` must be moved back to the previous server's model name.
-* The GPUs need time to return VRAM after the Inkling container exits; the Inkling launcher itself waits
-  up to 5 minutes for 29.5 GiB free on both cards. Start another :8000 server only after `docker ps`
-  shows no Inkling container.
-* Wait for the other server's own readiness; do not infer it from the port opening.
+* `tp2-prod.service` is the boot default for the Qwen stack and owns :8000 (`SETUP/systemd-user/tp2-prod.service`).
+  It runs `SETUP/serve-b70lab-tp2.sh` with `W4A8=1` and the two `W4A8_*` paths in its `Environment=` lines;
+  `W4A8=0` rolls that stack back to the W4A16 baseline.
+* Clients that were moved to model name `inkling2-mini` must be moved back to the Qwen served name.
+* The GPUs need time to return VRAM after the Inkling container exits; the Inkling launcher itself waits up to
+  5 minutes for 29.5 GiB free on both cards. Start Qwen only after `docker ps` shows no Inkling container.
+* Wait for the Qwen server's own readiness; do not infer it from the port opening.
 
 ## 3. OpenCode provider (`inkling-local/inkling2-mini`)
 
-**NEEDS INPUT.** The OpenCode config is outside the readable directories. Paste the provider block verbatim
-here (path normally `~/.config/opencode/opencode.json`).
+Filled in 2026-11-22 from the live laptop config (`~/.config/opencode/opencode.json`); the
+top-level default `"model"` was switched to `"inkling-local/inkling2-mini"` at the cutover (the old default
+would 404). The provider block verbatim:
+
+```json
+    "inkling-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Inkling 2 Mini (local B65)",
+      "options": {
+        "baseURL": "http://<TAILNET-IP>:8000/v1",
+        "apiKey": "local"
+      },
+      "models": {
+        "inkling2-mini": {
+          "name": "Inkling 2 Mini (TP2, 262144, FP8 KV)",
+          "tool_call": true,
+          "temperature": true,
+          "reasoning": true,
+          "attachment": false,
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          },
+          "cost": {
+            "input": 0.0,
+            "output": 0.0
+          },
+          "limit": {
+            "context": 262144,
+            "output": 16384
+          }
+        }
+      }
+    },
+```
 
 **NEEDS INPUT — rationale for output 16384 rather than 32768.** The reason was stated by the user at the
 cutover and is not recorded anywhere the author could read, so it is not reconstructed here. Facts that bear on
 it and that *are* measured: the context cap is 262144 tokens (prompt plus output), and at a 258K prompt only about
 4K tokens of output room remain (PERF-LOG §5); the answer-room trade-off table is in DECISIONS §6.
 
-## 4. Dashboard
+## 4. Dashboard (`SETUP/10-dashboard.py`)
 
-The author's local monitoring dashboard was edited so it describes whatever owns :8000 instead of assuming
-the previous model: the TP2 collector accepts the `inkling2-tp2` container (any `-tp2` name), reads the
-served model name from `/v1/models` and labels it `Inkling-2-Mini` / `NVFP4 / INT4` / `DSPARK`; a service
-row falls back to probing `/health` when :8000 does not answer the router's `/_router` endpoint; and when
-an Inkling served model is detected the stack-switch controls are hidden. The dashboard code and the
-legacy stack-switch script behind its switch panel target the internal previous stack and are not part of
-this repo.
+The dashboard (`llm-dashboard.service`) was edited so it describes whatever owns :8000 instead of assuming Qwen.
+The file in the working tree differs from `HEAD` by +1604/−521 lines because the same working copy also contains
+the overview redesign (KPI cards, charts) and NVMe sensors; the Inkling-specific changes are:
 
-### WARNING — stack-switch actions are not guarded server-side
+| Change | Where | Behaviour |
+|---|---|---|
+| Hard-coded container name | `_tp2()` (line ~852) | was `"qwen38-tp2" in docker ps`; now true if any running container is `qwen38-tp2`, `inkling2-tp2` or ends in `-tp2` |
+| Served-model detection | `_tp2()` (~966-979) | reads `/v1/models` and records `served_model`; keeps the last served name while the container is down |
+| `/api/stack` live overlay | `do_GET` (~1314-1335) | `switch-stack.sh status` only knows the OVMS/tp2-prod pair; if the collector sees a running TP2 container the response is overlaid with `tp2: true`, `tp2_ready`, and, when the script said `idle`, `detail: "serving: vLLM TP2 (inkling2-mini)"` |
+| Router fallback | `_services()` (~757-767) | if `/_router` does not answer the :8000 row is probed on `/health` and labelled `vLLM` / `OpenAI API` instead of `router` / `front door` |
+| OVMS rows | `_services()` (~769-772) | a backend row is shown only if its `ovms-card<N>` container is running |
+| Labels | JS `modelInfo()` (~1673-1706), page title `Inkling-2-Mini · 2× Arc Pro B65` | a served model name containing `inkling` shows `Inkling-2-Mini`, `NVFP4 / INT4`, `DSPARK`; otherwise `Qwen3.8-27B` labels as before |
+| Decode chart | `_tp2()` | adds `decode_tps_short` (≈12 s window) and `requests_done_total` so the overview card follows live tokens/s |
+| UI suppression | JS (~2206-2219, ~2787-2790) | when Inkling is detected the OVMS/TP2 switch buttons and the depth selector are hidden and `doSwitch()` shows an alert |
 
-The switch panel's server-side endpoint runs the legacy stack-switch script, whose protections are
-loopback-only access, a required header, and a rate limit — **there is no check for Inkling**. **Do not
-fire a stack-switch action while Inkling owns :8000:** the legacy actions compete for :8000 and both GPUs.
-A rewrite of the switch tooling is on the not-done list (§6).
+Backups (untracked, same directory):
+
+* `SETUP/10-dashboard.py.bak-20261121-183432` — 125,258 bytes, 2026-11-21 18:34
+* `SETUP/10-dashboard.py.bak-stack-183529` — 125,974 bytes, 2026-11-21 18:35 (taken before the `/api/stack` overlay edit)
+
+The edited file is 132,205 bytes (2026-11-22 05:59).
+
+### WARNING — the switch panel still drives `switch-stack.sh`
+
+`POST /api/stack` runs `SETUP/switch-stack.sh start ovms|tp2` (`_post_stack`). Its protection is: loopback-only
+unless `--allow-remote-switch`, the `X-Dash-Switch: 1` header, and a rate limit. **There is no check for Inkling
+on the server side;** the hiding of the buttons is a client-side convenience, and it only engages when the
+collector currently reports an Inkling served model. `switch-stack.sh` knows only the Qwen stacks: `do_tp2`
+rewrites the `tp2-prod.service` drop-in from its own defaults and starts the Qwen TP2 container, and the `ovms`
+action starts OVMS. **Do not press the switch buttons, and do not POST to `/api/stack`, while Inkling owns :8000.**
+Both actions compete for :8000 and both GPUs. A rewrite of `switch-stack.sh` is on the not-done list.
 
 ## 5. Where everything lives
 
-All paths under `~/work/` unless stated. Several of these scripts have CRLF line endings; the shell
+All paths under `/home/operator/work/` unless stated. Several of these scripts have CRLF line endings; the shell
 prints a harmless `$'\r': command not found` on the last line and the launch still happens.
 
 | Script | What it does |
@@ -169,13 +249,13 @@ Code and data:
 
 | What | Where |
 |---|---|
-| Model code | `~/work/vllm/vllm/models/inkling2/xpu/` (`model.py`, `attention.py`, `triton_*.py`, `moe.py`, `dspark.py`, `prof.py`, `XMX.md`) |
-| Tests | `~/work/vllm/tests/models/inkling2/xpu/` (`test_triton_*`, `test_moe_tiered.py`, `test_ctrl_gemm.py`, `test_mix_mp.py`, `test_prep_fused.py`, `test_fp4_decode_fast.py`, `quality_vs_llamacpp.py`, ...) |
-| Benchmarks and run output | `~/work/agents/` (`prefill_bench.py`, `deep4.py`, `needle_corpus.py`, `decode/spec_k_bench.py`, `decode/quality_dump_http.py`, `routing/`, `graph_gap_bench.py`, `ar_graph_bench.py`, ...). Do not run Python scripts from `agents/decode/`: `concurrent.py` there shadows the standard library |
-| Engineering log | `~/work/INKLING2_XPU_HANDOFF.md` (sessions 2-3 only; later work is recorded in these three documents) |
+| Model code | `/home/operator/work/vllm/vllm/models/inkling2/xpu/` (`model.py`, `attention.py`, `triton_*.py`, `moe.py`, `dspark.py`, `prof.py`, `XMX.md`) |
+| Tests | `/home/operator/work/vllm/tests/models/inkling2/xpu/` (`test_triton_*`, `test_moe_tiered.py`, `test_ctrl_gemm.py`, `test_mix_mp.py`, `test_prep_fused.py`, `test_fp4_decode_fast.py`, `quality_vs_llamacpp.py`, ...) |
+| Benchmarks and run output | `/home/operator/work/agents/` (`prefill_bench.py`, `deep4.py`, `needle_corpus.py`, `decode/spec_k_bench.py`, `decode/quality_dump_http.py`, `routing/`, `graph_gap_bench.py`, `ar_graph_bench.py`, ...). Do not run Python scripts from `agents/decode/`: `concurrent.py` there shadows the standard library |
+| Engineering log | `/home/operator/work/INKLING2_XPU_HANDOFF.md` (sessions 2-3 only; later work is recorded in these three documents) |
 | Checkpoints | `/work/models/inkling-xpu4` (served), `inkling-xpu4-spec` (drafter), `inkling-hf` (original), `inkling-bf16` (49.2 GiB dequantised, `config.json.orig` keeps the original config) |
 
 ## 6. Not done at go-live
 
-See DECISIONS §9. In short: the quality/verbosity comparison against the previous production model, the stack-switch
-tooling rewrite, and the items from the upstream list that were never tried.
+See DECISIONS §9. In short: the Inkling-vs-Qwen quality and verbosity comparison, the `switch-stack.sh` rewrite,
+and the items from the upstream list that were never tried.

@@ -93,3 +93,14 @@ next step.
 Apache-2.0, same as vLLM — this is a derivative work of
 [vllm-project/vllm](https://github.com/vllm-project/vllm) at commit
 `4c61621b4` (see `LICENSE` and `NOTICE`).
+
+## Experiments & ops tooling
+
+`experiments/` holds the measurement scripts behind the perf log (acceptance/step
+benches `deep4`/`deep5`, needle and KV-quality probes, prefill chunking and
+attention/allreduce sweeps, expert-dtype benches). `ops/` adds the experiment
+server launchers (clean, 4096-chunk, profiling, A/B variants) and the installed
+production unit (`ops/inkling2-prod.service`) alongside the draft example in
+`docs/`. `docs/inkling2-switch.md`, `INKLING2_XPU_HANDOFF.md` and
+`INKLING2_XPU_QUALITY.md` are the pre-cutover switch note and the working
+handoff/quality documents.

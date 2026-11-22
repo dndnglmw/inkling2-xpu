@@ -1,0 +1,20 @@
+# Example only. Copy to ~/.config/systemd/user/inkling2-tp2.service to use.
+[Unit]
+Description=Inkling 2 Mini TP2 vLLM (XPU port) - owns :8000 (do not run with tp2-prod.service)
+After=network-online.target docker.service
+Wants=docker.service
+Conflicts=tp2-prod.service tp2-prod-r304.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/operator/Documents/Default Project
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do docker info >/dev/null 2>&1 && exit 0; sleep 2; done; echo "dockerd not ready" >&2; exit 1'
+ExecStart=/bin/bash "/home/operator/Documents/Default Project/SETUP/serve-inkling2-tp2.sh"
+TimeoutStartSec=infinity
+Restart=always
+RestartSec=15
+StandardOutput=append:/tmp/inkling2-tp2.log
+StandardError=append:/tmp/inkling2-tp2.log
+
+[Install]
+WantedBy=default.target
