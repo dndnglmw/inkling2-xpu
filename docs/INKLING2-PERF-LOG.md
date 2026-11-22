@@ -453,3 +453,10 @@ full-context seqs (same), or an fp8 KV pool (halves the KV share of the mirror -
 section 11.2). No xe module parameter exposes allocation placement; ReBAR is enabled (32 GB BAR 2 on both
 cards, asserted in `01-sudo-system-setup.sh`), so the mirror is not a small-BAR workaround - it is how this
 kernel accounts the driver's memory.
+
+Stop-test (Nov 22, later): with the server stopped, GPUActive drops 58.4 GiB -> 21 MiB, MemFree 10.5 -> 81.5
+GiB, MemAvailable 21.4 -> 92.3 GiB (real DRAM: 98.0 GiB, 49 x 2 GiB blocks), AnonPages 12.6 -> 0.68 GiB.
+The entire mirror releases cleanly on stop - no leak, no permanent pinning. Idle host usage ~12 GiB.
+While serving, the floor is set by the weights mirror (17.8 GiB for both cards) plus the minimum viable
+pool: even a single-262144-request configuration (GPU_UTIL ~0.77) lands at ~61 GiB used. Implication: the
+~24 GiB host-RAM target is only reachable with the server stopped; on-demand serving is the lever.
