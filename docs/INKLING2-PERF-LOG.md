@@ -144,9 +144,13 @@ Single-visit timings are noisy: later reruns on the same code gave tiered 12.52 
 | TP1 bf16 / NVFP4 / MXFP8 | 0.288 / 0.165 / 0.185 | 0.524 / 0.262 / 0.310 | 0.928 / 0.539 / 0.580 | 1.609 / 0.978 / 1.065 |
 | TP1 bf16 / NVFP4 | 1.75x | 2.00x | 1.72x | 1.64x |
 
-Effective NVFP4 bandwidth at TP2 T=4 is 261 GB/s against 468 GB/s for bf16 through the same machinery. Split-K
-config sweep (`INKLING_MOEQ_SPLIT`) at T=2/4/8: default 0.172 / 0.292 / 0.490 ms (0.147 / 0.253 / 0.491 for the
-identical explicit default — about 15% noise); no config was better.
+CORRECTION (Nov 22, micro-bench `agents/moe_micro.py`): the GB/s figures above counted w13 only and skipped
+w2 — with w2 included, the NVFP4 decode kernel already runs at ~75-95% of the card's achievable rate
+(~454-575 GB/s physical at TP2 T=4 against the 608 GB/s card), matching the bf16 machinery's efficiency;
+the dequant costs only ~5% over a raw-load variant (0.249 vs 0.236 ms per visit). The decode MoE is near
+its practical floor: logical per-pair re-reads (32 pairs over ~25 unique local experts, L2 deduping ~21%)
+put the realistic floor at ~10-11 ms per step vs 12.4 measured — <=2 ms upside. Split-K config sweep
+(`INKLING_MOEQ_SPLIT`) at T=2/4/8: default 0.172 / 0.292 / 0.490 ms; no config was better.
 
 ## 4. Decode history (single stream unless stated)
 
@@ -474,3 +478,24 @@ At this box's 262144 operating point that is ~59 GiB mirror + ~13 GiB host => a 
 comfortable size; 64 GiB would thrash under load, and a 1M-context pool hung a 91-GiB-visible host.
 With the server stopped the same host idles at ~12 GiB used. Lower `GPU_UTIL` trims the mirror
 proportionally (0.78 measured above) at a direct concurrency cost.
+
+
+## 13. One-shot AR on BF16, and long-context launch noise (Nov 22)
+
+One-shot P2P all-reduce (`VLLM_XPU_ONESHOT_AR=1`) retested on the current BF16 build (the +1.2% figure
+was from the FP8-era build): bit-identical outputs on the 12-prompt quality suite (576/576 top-1,
+KL 0.00000), but speed is mixed and mostly within long-context launch noise - 8K: code 89.9 (-4.4%),
+prose 94.9 (+1.9%), verbatim 106.3 (-7.0%); 234K: code 75.2 (-2.6%), prose 73.1, verbatim 45.9 (+0.7%).
+Production keeps it OFF; the knob is documented for prose-heavy workloads.
+
+**Long-context acceptance is launch-noisy**: prose-summary tok/step at ~234K measured 2.35, 2.56 and 2.79
+across three same-config launches (tok/s 58.8-74.6, about +-11%), while short-prompt logits are
+bit-identical across launches (section 11.2). The far-attention reduction order evidently depends on
+per-boot page layout, so long-context A/B verdicts need same-boot paired runs or n>=5 repeats; short-context
+verdicts remain single-run trustworthy. (This also revises section 8's per-launch nondeterminism note:
++-0.1-0.17 tokens/step applies to LONG contexts; short contexts are deterministic.)
+
+The suspect mechanism for the drafter's sensitivity: the markov head consumes target hidden states whose
+bit patterns shift with any numeric-path change (KV dtype, reduction order), and prose acceptance moves
+-0.39 / +0.44 tokens/step across such shifts. Not fixable without drafter retraining; verification keeps
+outputs correct regardless (spec decoding is correctness-preserving; only speed moves).

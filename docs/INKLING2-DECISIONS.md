@@ -125,8 +125,12 @@ numbers, referred to below as PERF-LOG §n). Each entry states the decision, the
 * **`switch-stack.sh` rewrite.** It still knows only the OVMS / Qwen TP2 pair, its `do_tp2` rewrites the
   `tp2-prod.service` drop-in, and the dashboard's server-side `POST /api/stack` has no Inkling guard (GO-LIVE §4).
 * **Upstream list never tried:** vLLM #68303 was never evaluated for prefill. Not attempted either: bounded 16K draft
-  window (acceptance risk unmeasured), a redesigned decode MoE kernel toward its bandwidth floor (estimated 4-5 ms,
-  sweeps found nothing), investigating the near-attention growth, a real TurboQuant-style KV format (only simulated:
+  window (acceptance risk unmeasured), a redesigned decode MoE kernel: REVISED Nov 22 - the micro-bench (`agents/moe_micro.py`) shows the NVFP4
+  decode kernel already at ~75-95% of achievable bandwidth (the earlier 261-vs-468 GB/s table miscounted
+  bytes, skipping w2; the dequant costs ~5% over raw loads), and per-pair re-reads leave only ~2 ms of the
+  12.4 against the unique-expert floor, so the "4-5 ms" estimate was optimistic and the item is
+  deprioritized; untried angle remains a vendor bf16-activation FP4 GEMM. Still open: investigating the
+  near-attention growth, a real TurboQuant-style KV format (only simulated:
   4-bit KL 0.0055 vs uniform int4 0.0595 vs fp8 0.0020), a bf16-activation FP4 kernel in a vendor/SYCL library, and
   larger prefill chunks without the capacity loss.
 * **Power efficiency analysis** (section 12): tokens-per-second-per-watt and the serialisation cost are not recorded.
