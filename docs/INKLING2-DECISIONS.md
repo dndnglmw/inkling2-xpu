@@ -294,3 +294,13 @@ unreclaimable, and the dominant term; process anon memory is ~17 GiB; headroom 1
 swap with PSI at zero. No legitimate xe/driver knob reduces the mirror; overcommit mode 2 would break
 vLLM; a container memory cap would be harmful. Verdict: expected-per-the-mirror, not wasteful, not
 dangerous - no change. Optional insurance (bigger swap or zram) noted for a maintenance window only.
+
+
+## 19. Host-DRAM mirror: fixable, workaround verified (Nov 22)
+
+Supersedes section 18's "leave as is". The 57.7 GiB mirror is compute-runtime regression #953
+(defer-backing for BMG, 26.09+), not a hardware or driver cost. Verified fix on this stack:
+NEOReadDebugKeys=1 EnableDeferBacking=0 - GPUActive 51.10 -> 0.57 GiB at boot, MemAvailable
+26.5 -> 74.5 GiB, no load growth, deep4 bands normal, exactness gate 576/576 (KL(defer0||bf16) over shared top-20: mean 0.00000  max 0.00000  (576 positions)).
+Adoption decision (debug-key caveat + kernel-7.0 residual upstream) recorded with the data in
+PERF-LOG section 18.

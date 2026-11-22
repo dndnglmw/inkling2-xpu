@@ -650,3 +650,40 @@ mirror-bounded host DRAM (activations on-card) - empirically fine all day (multi
 pressure events), though GPUActive was not logged DURING a spike. Insurance options if ever wanted
 (maintenance-window changes, not done): larger swap file or zram for the anon side. The mirror itself
 remains the documented cost of the ~61 GiB sizing rule - not wasteful, not fixable, not dangerous.
+
+
+## 18. The mirror is a software regression: root cause found, fix verified (Nov 22)
+
+Section 17's "expected-per-the-mirror, not fixable" verdict is SUPERSEDED. The 57.7 GiB GPUActive
+mirror is a **userspace regression in Intel compute-runtime** (upstream issue
+intel/compute-runtime#953, GSD-13038): since 26.09+, a "defer backing for BMG" change makes every
+large device allocation in a multi-GPU-visible process get an eagerly-pinned host-RAM mirror on its
+peer registration. Single-GPU-visible processes do not pin. This explains every observation of the
+day: the bench container ran with ZE_AFFINITY_MASK=0 (one GPU visible) and showed no mirror for a
+plain 4 GiB device allocation, while production (ZE_AFFINITY_MASK=0,1) mirrored ~1:1; the config
+bisect (drafter off / graphs off / both off - four cells, boot GPUActive 51.1-51.5 GiB and post-8K
+60.5-60.6 in all four) showed no serving-stack toggle matters, because the peer registration exists
+for TP2 base allocations regardless. GPUActive itself is the kernel's TTM system-page counter for
+GPU objects (per-node GPU counters, mid-2025), and Resizable BAR was already active (32 GiB
+apertures on both cards) - small-BAR staging was refuted as the mechanism.
+
+**Fix verified on this stack**: `NEOReadDebugKeys=1 EnableDeferBacking=0` (the debug-key workaround
+confirmed by Intel in the issue). Production config with the env, verified in-container:
+- boot: MemAvailable 74.55 GiB / GPUActive 0.57 GiB (baseline cell was MemAvailable 26.46 / GPUActive 51.10 GiB)
+- after the full 8K deep4 suite: MemAvailable 74.57 GiB / GPUActive 0.57 GiB - the mirror does not grow with load
+- deep4 bands: 89.8 / 84.2 / 111.2 tok/s - normal, no regression
+- exactness vs bf16 reference: top-1 576/576, KL(defer0||bf16) over shared top-20: mean 0.00000  max 0.00000  (576 positions) (gate capture saved)
+
+Net effect: ~50 GiB of host RAM returned at boot, the ~9 GiB per-load growth eliminated; MemAvailable
+under full production goes from ~17.5 GiB to ~74.6 GiB. This also retroactively explains the
+1M-token hang (mirror exhaustion during pool sizing) and matches the vLLM-TP2 host-OOM reports in
+the upstream issue.
+
+**Caveats, on the record**: Intel states debug keys are "strictly for debugging" and recommends the
+proper fix; the proper fix shipped in 26.35.39758.10 and was confirmed on 2x B70 (kernel 7.1.8) -
+but a 2x B60 reporter on kernel 7.0.0-31 + 26.35 still hit host OOM in the PRIME/dma-buf path
+(xe_ttm_tt_populate), fixed only by dropping to kernel 6.17, and one reporter still saw the
+behavior on 26.40 (Nov 13). This box is kernel 7.0.0-44, so the runtime upgrade alone may not
+suffice here. The env is therefore the pragmatic, verified fix with upstream tracking; the
+passthrough in run-ab.sh is inert unless NEOReadDebugKeys=1 is set (all other windows and boots ran
+with it off).
