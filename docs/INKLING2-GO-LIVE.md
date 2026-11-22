@@ -11,7 +11,12 @@ activated); where it disagrees with this file, this file wins.
 > (PERF-LOG section 11): live FP8 KV failed the quality gate by ~160x (mean KL 0.318 vs <= 0.002, top-1
 > 443/576, greedy text 7/12, deterministic across launches) AND BF16 was faster (234K code 77.2 vs 68.5 tok/s,
 > step 44.4 vs 48.0 ms, prefill ~7% faster); the sole cost is the KV pool, 640,939 -> 439,959 tokens
-> (2.45x -> 1.68x concurrency). Sections below describe the FP8-era configuration where not updated.
+> (2.45x -> 1.68x concurrency). Sections below describe the FP8-era configuration where not updated.>
+> **Revision 2026-11-22 (same day, later): a `GPU_UTIL` trim was tried and REVERTED.** 0.78 ran briefly
+> (pool 373,153 tokens / 1.42x concurrency, GPUActive 46.7 GiB, used 59 GiB, MemAvailable 33.4 GiB) to cut
+> the host RAM mirror; reverted to 0.85 the same day (pool 439,855 tokens / 1.68x, verified serving) - the
+> RAM targets under discussion were for other machine specs. Numbers, the stop-test proving the mirror
+> releases fully, and the machine-sizing rule: PERF-LOG section 12.
 
 > **Read this first — what this document could and could not verify.**
 > The author of this pass had read access to the repo and `/home/operator/work/` only. The installed

@@ -460,3 +460,17 @@ The entire mirror releases cleanly on stop - no leak, no permanent pinning. Idle
 While serving, the floor is set by the weights mirror (17.8 GiB for both cards) plus the minimum viable
 pool: even a single-262144-request configuration (GPU_UTIL ~0.77) lands at ~61 GiB used. Implication: the
 ~24 GiB host-RAM target is only reachable with the server stopped; on-demand serving is the lever.
+
+Revert (Nov 22, later still): production back to `GPU_UTIL` 0.85 per user decision - pool 439,855 tokens,
+1.68x concurrency at the cap (verified serving). The 0.78 trim above stays recorded as the measured trade.
+The RAM targets discussed in this exchange were for OTHER machine specs, not this box.
+
+Machine-sizing rule for spec'ing similar 2x-B65 boxes (the practical output of this exchange): the xe
+driver mirrors the GPUs' on-card working set 1:1 into host DRAM (`GPUActive`), so host RAM must cover
+
+    sum over cards of (weights + KV pool + activation/graph/conv-state overheads)  +  ~15 GiB host
+
+At this box's 262144 operating point that is ~59 GiB mirror + ~13 GiB host => a 96 GiB kit is the minimum
+comfortable size; 64 GiB would thrash under load, and a 1M-context pool hung a 91-GiB-visible host.
+With the server stopped the same host idles at ~12 GiB used. Lower `GPU_UTIL` trims the mirror
+proportionally (0.78 measured above) at a direct concurrency cost.
