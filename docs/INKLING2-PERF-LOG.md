@@ -874,3 +874,35 @@ query-len planning + ragged-tolerant near-attention + varlen graph capture + rej
 assert check (sample/rejection_sampler.py:343). Fallback ladder (num_speculative_tokens_per_batch_size)
 is scheduler-level, batch-keyed, uniform-shape - works today but cannot express content
 dependence; useful for the concurrency axis only.
+
+### Quality-gate investigation (Nov 22, evening): the bit-exactness gate measures decode SHAPE, not quality
+
+Sequence: the 2-entry ladder [[1,2,7],[3,512,5]] booted and ran mechanically (multi-k works on
+dspark/XPU: solo deep4 exercised the k=7 entry, a 4-way concurrent burst exercised the k=5 entry -
+4/4 complete, acceptance windows show clean 5-position entries with exact 0.000 at unverified
+positions 6-7; pool 434,222). But its quality capture FAILED the gate: top-1 525/576, KL mean
+0.06729 / max 8.07592, greedy text 8/12 vs the bf16 reference. A static-k7 capture then produced
+BYTE-IDENTICAL deviations (same 525/576, same KL to 5 decimals) - depth-general, not
+ladder-specific. A no-spec capture then deviated MORE: top-1 450/576, KL 0.21231/14.02729, text
+7/12.
+
+Interpretation: the reference capture is the 4-row decode-shape trajectory (k3 spec, bs=1), not
+"the model's true output". The decode forward is SHAPE-SENSITIVE - each per-step row count
+(1 row no-spec, 4 rows k3, 8 rows k7) yields its own greedy trajectory, and a single flipped
+near-tie amplifies chaotically over a generation (hence max-KL 8-14 on diverged texts while
+matching texts agree exactly). Cross-boot per-shape determinism is already proven (c3072, a
+different boot 8h later with different prefill chunking, was bit-identical to the reference).
+Corollaries: (a) the gate as written (KL <= 0.002 + full top-1 agreement) can never pass any
+depth/verify-structure change; (b) production under concurrency (bs >= 3 -> padded graph shapes)
+already serves trajectories that do not match the bs=1 reference today; (c) the depth-induced
+deviation (0.911 top-1) is larger than the rejected int8-dense deviation (0.994) - the gate
+cannot distinguish quantization loss from shape noise as constructed.
+
+Disposition: production STAYS k=3 (gate-clean per the standing rule). The gate-policy question is
+raised for the operator: (1) keep bit-exactness -> k3 is permanent, depth menu (+18% blended),
+adaptive verification, and the F3zz1k MoE kernel port are all dead; (2) redefine quality
+preservation for a bf16 stack (needle recall + task-level metrics + matched-trajectory KL
+tolerance) -> levers reopen; (3) fund shape-invariance (fixed-shape padded decode: always compute
+at a max-row padded batch with masking) -> one trajectory for all shapes, some padded-compute
+cost. Next: component-level shape-consistency probe (tiered-MoE dispatch, attention fold paths,
+sconv state across row counts) to scope option 3.

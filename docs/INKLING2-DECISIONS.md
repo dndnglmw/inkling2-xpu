@@ -369,3 +369,16 @@ mixes. Adaptive verification = the measured +18.2%-blended prize but L-size on o
 (host-side metadata planning; silent-corruption risk) - parked as a campaign; estimator-alone
 (needs no confidence head) confirmed. Ladder config verified working on dspark/XPU for the
 concurrency axis.
+
+
+## 26. Gate policy: bit-exactness measures decode shape, not quality (raised Nov 22)
+
+Quality-gate captures across decode shapes: k7-spec and the 2-entry ladder deviate identically
+from the k3 reference (525/576 top-1, KL 0.067 mean); NO-SPEC deviates more (450/576, KL 0.212).
+The reference is the 4-row-shape trajectory; the decode forward is shape-sensitive and greedy
+trajectories diverge chaotically per shape. The gate as written blocks every depth change, the
+adaptive-verification path, and the F3zz1k kernel port, while production's own concurrent traffic
+already deviates from the bs=1 reference. Production stays k=3 under the standing rule. Operator
+decision raised: keep bit-exactness (k3 permanent) / tolerance gate for shape noise / fund
+fixed-shape padded decode for true shape-invariance. Evidence: PERF-LOG gate-investigation
+section (this date); captures ab-quality-k2e/k7q/nospec.json vs ab-quality-bf16.json.
