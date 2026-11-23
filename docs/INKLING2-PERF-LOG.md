@@ -1043,3 +1043,25 @@ GB/s write ceiling caps more). Watch list for the gated future: #4327 (matmul-wi
 pattern) and #8628 (SLM-staged decoded dot operands, merged Nov 11) - Intel is building fused
 dequant-dot into the compiler; vllm-xpu-kernels 0.1.16.2 -> 0.1.18 upgrade relevant only if the
 gate ever reopens.
+
+### Rebias prototype: CLOSED with evidence (Nov 22, night) - the dequant kernel is done within the gate
+
+Prototype of the #7040 rebias technique for e2m1 (agents/rebias_probe.py, dump16.py): the naive
+adaptation is BIT-WRONG at exponent-carry boundaries (nib 4-7 decode at 2^(1-e) of target - the
+126+e exponent addition requires a CARRY, which OR-based bit placement cannot perform; Intel's
+fp8 chain handles it with masks that e2m1's 16-value domain still needs, just in different
+form), and the measured variant is SLOWER than production (2.45 vs 2.40 ms at the w13 tile).
+Decisive context: Intel's -50% was on a 100-op fp8 chain; our _e2m1_fast is already ~10 ops, so
+the rebias upside was bounded at ~-0.35 ms decode ALU (~+1.2% prefill) even if correct.
+Interleave diagnostic: no-interleave 2.199 vs 2.396 ms - tl.interleave costs only ~4% here, not
+a layout-conversion blowup.
+
+FINAL "full 608" verdict, quantified at every level: (1) op write floor 475 GB/s (680 MB write
+vs 191 read; pure-write probe) - 586/608 are read-dominated rates, unreachable for this shape;
+(2) config space exhausted (production tile config optimal); (3) decode ALU surgery ceiling
+~+1.5% prefill for M effort (rebias wrong-for-e2m1, LUT needs SLM Triton lacks); (4) the only
+608-class design (fused dequant-in-register grouped GEMM - 191 MB read, zero bf16 write,
+read-dominated profile) is gate-blocked; (5) gate-safe structural alternative (bf16-resident
+experts, +17% prefill) trades pool 434K -> ~266K - operator declined territory. The dequant
+kernel is DONE within the bit-exactness constraint; remaining gate-safe prefill items are the
+dequant cache wiring (+2-4%) and glue fusion (+1-2%).
