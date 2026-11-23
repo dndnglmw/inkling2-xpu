@@ -906,3 +906,23 @@ tolerance) -> levers reopen; (3) fund shape-invariance (fixed-shape padded decod
 at a max-row padded batch with masking) -> one trajectory for all shapes, some padded-compute
 cost. Next: component-level shape-consistency probe (tiered-MoE dispatch, attention fold paths,
 sconv state across row counts) to scope option 3.
+
+### Shape-consistency probe (Nov 22, evening): sensitivity localized to oneDNN GEMM M-blocking; MoE exonerated
+
+Component probe (agents/shape_probe.py, bench container, one device, bf16, real shapes
+D=2304/I=1152/E_local=64/K=8): (1) plain bf16 GEMM via `@`: M=8 vs 8xM=1 flips 2/8 rows (1
+element each); M=8 vs 2xM=4 flips 1/8 - oneDNN reduction order varies with M; (5) F.linear at the
+same shapes: 0/8 - dispatch-path dependent; (2) bf16 BMM T=4 vs 4xT=1: 0/4; (3) tiered MoE
+executor (NVFP4, production path): T=8 vs 2xT=4 vs 8xT=1 - ALL bit-exact; (4) triton bf16 MoE:
+T=8 vs 2xT=4 bit-exact. Verdict: the tiered-MoE dispatch and our Triton kernels are
+shape-consistent; the trajectory divergence comes from the dense-projection GEMMs (qkv/o/lm-head)
+whose M changes with every decode shape (no-spec 1 row, k3 4 rows, k7 8 rows, concurrency
+padding). A flipped last-ulp element in a 2304-dot amplifies chaotically over a generation.
+
+Fix sketch (option 3, now concrete): decode GEMMs are bandwidth-bound (weight streaming
+dominates), so padding every decode step to ONE fixed row shape (single cudagraph capture size,
+masked dummy rows) makes all dense GEMMs shape-invariant at near-zero wall cost - one trajectory
+for every depth and concurrency. Prerequisite for reopening the depth menu under a bit-exactness
+gate; also the template for gating the F3zz1k MoE port (his grouped GEMM must additionally be
+bit-identical to dequant+bmm at the SAME shape to pass unmodified - otherwise the gate question
+applies to it too).
