@@ -772,3 +772,22 @@ lazy-vs-eager pinning was the difference between usable and unusable host memory
 kernel/xe enabling BMG cross-root-port P2PDMA would raise the collective ceiling from ~6.7 to
 fabric-class rates (est. 20-50 GB/s), cutting the ~190 ms/chunk prefill allreduce exposure to
 ~60-80 ms (+5-7% prefill) - a kernel-upgrade lever, not addressable from user space today.
+
+
+### Link-capability chain measured (Nov 22): GPU1 is starved by a Gen4 x4 CPU root port
+
+sysfs max/current link training across both chains (unprivileged sysfs, max_link_speed/width):
+GPU0 chain: root port 00:01.1 = 32 GT/s x16 (Gen5 x16, training full) -> card switch (Intel e2ff)
+32 GT/s x16 -> GPU. GPU1 chain: root port 00:02.2 = **16 GT/s x4 (Gen4 x4)** -> card switch LnkCap
+32 GT/s x16 (the card is Gen5 x16 capable!) -> starved to Gen4 x4. The B65 cards are Gen5 x16
+devices; the B850M wired slot 2 to an M.2-grade CPU root port. This x4 uplink is the measured
+6.7 GB/s cross-copy ceiling (matches), and it caps all TP2 collectives today.
+
+Board-swap arithmetic (asked: "worth a pcie5 x8/x8 board?"): a second slot at >= 32 GB/s CPU-direct
+(Gen5 x8 or Gen4 x16) lifts the collective ceiling ~4x: all-reduce 1.84 -> ~0.5 ms per 9.4 MB,
+prefill collectives ~190 -> ~60-80 ms (+4-6% prefill), decode all-reduce 1.4 -> ~0.5 ms/step
+(+1-3% decode), and positions for the kernel P2P unlock (Gen5 x8 direct = 32 GB/s). Caveats: true
+dual-Gen5-x8 AM5 boards are rare (most give x16 + a x4 M.2-grade port - exactly this situation);
+Gen4 x16 on the second slot equals Gen5 x8 and is equally fine; and the swap costs a full stack
+re-validation day. Verdict: worth it IF a suitable board is found at reasonable cost; not urgent
+enough for a platform (sTR5) move alone.
