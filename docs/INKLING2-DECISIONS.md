@@ -83,7 +83,7 @@ numbers, referred to below as PERF-LOG §n). Each entry states the decision, the
 
 * **Cap:** 262144 tokens per request, set in `serve-noprof.sh` and every launcher derived from it.
 * **1M is unsafe until proven otherwise.** The 1,048,576-token server was live when the host hung: swap was full and
-  the machine stopped answering Tailscale pings, and it had to be power-cycled (reported by the user). From then
+  the machine stopped answering [redacted] pings, and it had to be power-cycled (reported by the user). From then
   on no launcher may use `MAX_MODEL_LEN=1048576`. The 1M-config server had fitted with fp8 KV and passed a needle at
   518,738 tokens; a 940,000-token needle was started and never completed (its client died), so nothing was proven
   at 1M and nothing further was attempted.

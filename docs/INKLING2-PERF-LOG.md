@@ -1095,3 +1095,39 @@ Ops lessons: (1) debug boots must not share port 8000 with a restore window (a d
 :8000 during a restoreprod and production failed to come up until the debug container was
 removed); (2) --rm containers vaporize docker logs on crash - debug boots use named containers
 with explicit log capture, third time this lesson has applied.
+
+### SESSION SUMMARY - Nov 22, 2026 (the full arc, in order)
+
+1. Inter-GPU data path verified: no VRAM-to-VRAM P2P (cross-card 6.7 GB/s host-staged vs 215.7
+   same-device); topology CPU-direct but kernel-refused (#935); kernel P2P unlock on the watch list.
+2. Link-capability chain measured: GPU1 starved by a Gen4 x4 CPU root port while the card is
+   Gen5 x16-capable; board-swap arithmetic recorded (+4-6% prefill if the second slot ever gets
+   >= 32 GB/s CPU-direct).
+3. F3zz1k inkling2-b70 fork assessed (Claude co-review): native SYCL kernel package is B65-
+   compatible; integration = two ops; port order settled (MoE GEMM -> attention -> int8); the
+   whole port sits behind the bit-exactness gate.
+4. DFlash2 drafter head: framing settled (feature distillation, gate-clean by construction -
+   drafts change, verification does not); training design sketched; PROJECT IN PLANNING, pilot
+   deferred by operator.
+5. DSpark depth map (k3 / shrunken-k5 / ladder-k5 / k7): no dominant static config; block-shrink
+   distortion PROVEN (native-block drafts accept 2.74 where shrunken 4-row accept 1.71 on
+   verbatim-250K); best-per-workload +18.2% blended - the measured adaptive prize.
+6. Adaptive verification disposition: estimator-alone viable (no confidence head needed, no
+   training), subclass fix ~10 lines, but L-size on the XPU backend (host-side metadata
+   planning); PARKED with a file:line worklist.
+7. Gate investigation: k7 == 2-entry-ladder byte-identical deviations; no-spec deviates MORE -
+   the bit-exactness gate measures DECODE SHAPE, not quality. RESOLVED by operator: gate
+   retained, k=3 PERMANENT; depth/adaptive/kernel-port/fusion levers closed; surviving levers =
+   draft quality (DFlash2) + memory + upstream watches.
+8. Shape-consistency probe: sensitivity localized to oneDNN GEMM M-blocking (0.005-0.024% of
+   elements flip across M); our MoE kernels bit-consistent everywhere (exonerated).
+9. Prefill kernel research (Claude co-reviewed): dequant kernel at 320-360 GB/s vs 586 - write
+   floor 475 GB/s makes full rate unreachable for a 4.5:1 write:read op; config space exhausted;
+   LUT/rebias inapplicable to e2m1 (exponent carry; chain already minimal); dequant cache dead
+   by VRAM reality (32 GB cards, 0.61 GiB steady-state free at 250K); CCL transport alternatives
+   invalid-or-neutral (matched pair identical to 0.2%, bit-exact 576/576); glue fusion (+1-2%,
+   M effort) is the only surviving item.
+10. Final state: production k=3, ofi/tcp, 434K pool, bit-pinned to the 4-row trajectory - the
+    gate-pinned optimum. 1941 tok/s @32K / 1589 @249K prefill, 90-114 tok/s decode at
+    3.4 tok/step. Watch list: Intel #8628/#4327 (compiler fused dequant-dot), kernel BMG P2P
+    unlock, DFlash2 training (planning).
