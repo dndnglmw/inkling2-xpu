@@ -453,3 +453,50 @@ path itself (576/576 KL 0.0, greedy 12/12), a fresh unseen image answered correc
 (finish=stop), and the pool trade is accepted: 434,084 -> 412,587 tokens (1.66x -> 1.57x
 concurrency) in exchange for full model capability. Rollback = the .bak-image0 serve script
 plus a restart.
+
+## 28. Determinism crisis: root-caused to torch-XPU batched matmul; fixed at the logits head (Nov 23)
+
+After the vision/u-0.88 changes settled, fresh-boot first gate runs began deviating (552/576,
+KL ~0.11) while later runs on the same boot were bit-exact - first seen at the 200K-cap boot
+and surviving the revert to 262144. A Claude-consulted investigation (evidence package
+preserved under work/evidence-bistability.md; tools in SETUP/inkling-det-tools/) localized it
+with a hash-based determinism probe:
+
+- The split path (per-row matmuls) is deterministic: 0 flips in ~1,200 executions, both cards.
+- The BATCHED matmul is bi-modal per process era: with hash-verified-stable inputs, whole eras
+  of execution return systematically different bits (card 1: 200/200 iterations deviant in one
+  process); era selection is timing/state random. Our Triton kernels, the oneDNN F.linear path,
+  and GPU memory (input hashes stable 0/200) are all exonerated.
+- The serving path's exposure is the LOGITS HEAD: model.py computed the 201K-vocab logits with
+  a batched torch.bmm(out_dtype=fp32) every decode step - the gate measures exactly those
+  logits. The tiered-MoE bmm fallback and the drafter's fp32 matmuls are the same family; at
+  the gate's shapes the Triton path covers the MoE, and the drafter's exposure is a queued
+  follow-up check.
+
+FIX (gate-clean by construction): the logits head now computes the sampler rows (<=8 per step)
+with per-row torch.bmm(out_dtype=fp32) - measured bit-identical to the batched form's stable
+mode (equiv_probe: identical digests on both cards, 0 flips in 50 executions) and flake-free.
+Cost: <=8 small bmms per step instead of 1 (negligible at serving sizes).
+
+Verified: three consecutive fresh-boot gates 576/576 KL 0.000 (run 1 was the reliably-bad case
+before the fix), live canary PASS, vision answers correctly.
+
+PERMANENT GUARD: the boot canary (SETUP/inkling-det-tools/canary/, runtime copy under
+work/inkling-det/canary/) - after every restart, 4 fixed prompts x48 positions including the
+known-deviant short[1] and short[4] are checked bit-exact (tokens + top-20 logprobs) against
+canary_ref.json with a zero-prefix-cache-hit assertion; traffic is admitted only on a pass,
+max 2 restarts, then flagged. restart-prod-canary.sh is the restart path. A
+CANARY_ALLOW_WARM=1 Mode B (warm-rerun admission) exists as a temporary escape and is to be
+retired once upstream ships a fix.
+
+UPSTREAM: the defect is in Intel's torch-XPU batched matmul (torch 2.15.0+xpu, SYCL runtime
+2026.1.2, both B65 cards affected; F3zz1k's 2.14.0 stack uses the standard LogitsProcessor
+matmul and is plausibly exposed too). det_probe is the minimal repro: cross-process digest
+flips plus within-process era flips on plain bf16 matmul with hash-stable inputs. Issue to be
+filed on intel/torch-xpu-ops.
+
+Also recorded this day: the 200K cap was rejected (552/576; pool 441,203 -> 386,815 - the
+planner quantizes worse at 200K, so 262144 strictly dominates) and max_model_len joins
+max-model-len-shape as a trajectory axis in the config-freeze list; u=0.88 adopted (pool
+restored to ~441.6K, 1.68x; 0.95 rejected on OOM math - the 250K headroom would go to about
+-1.7 GiB per card).

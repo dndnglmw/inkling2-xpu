@@ -553,7 +553,15 @@ class _XPULogitsProcessor(LogitsProcessor):
             and lm_head.weight.dtype == torch.bfloat16
         ):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            logits = torch.bmm(flat.unsqueeze(0), lm_head.weight.t().unsqueeze(0), out_dtype=torch.float32)[0]
+            # Per-row bmm: bit-identical to the batched form's stable mode, but
+            # immune to the batched-matmul mode-B nondeterminism (measured Nov 23:
+            # batched flips 0-2 elements per call across processes; per-row exact
+            # in every run). flat has <= max_num_seqs rows, so the loop is cheap.
+            wt = lm_head.weight.t().unsqueeze(0)
+            logits = torch.cat([
+                torch.bmm(flat[i:i + 1].unsqueeze(0), wt, out_dtype=torch.float32)[0]
+                for i in range(flat.shape[0])
+            ])
             if embedding_bias is not None:
                 logits = logits + embedding_bias.to(torch.float32)
             return logits.reshape(*hidden_states.shape[:-1], -1)

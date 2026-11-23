@@ -1147,3 +1147,17 @@ with explicit log capture, third time this lesson has applied.
     Production switched to image:1 the same day: gate re-verified on the production boot
     (576/576 KL 0.0, 12/12), an unseen-image smoke answered correctly; pool 434,084 ->
     412,587 tokens (1.66x -> 1.57x concurrency).
+
+12. Determinism crisis + fix (Nov 23): fresh-boot first gates deviated (552/576, fixed
+    divergence points (1,25) and (4,46)) while same-boot reruns were bit-exact; survived the
+    200K revert. Claude-consulted hash probe isolated the carrier: torch-XPU BATCHED matmul is
+    bi-modal per process era (200/200 deviant iterations in one process, inputs hash-stable;
+    the split per-row path 0 flips in ~1,200 executions on both cards; our Triton kernels,
+    oneDNN linear, and GPU memory exonerated). Serving exposure = the logits head's batched
+    bmm (201K vocab, every decode step). Fix: per-row bmm(out_dtype=fp32) at the logits head -
+    bit-identical to the stable mode (equiv_probe, both cards), 0 flips in 50; three
+    consecutive fresh-boot gates 576/576 KL 0.000; live canary PASS; vision intact. Permanent
+    boot canary wired (4 prompts x48 bit-exact including the deviant positions,
+    zero-prefix-hit assertion, max 2 restarts). Upstream repro prepared for
+    intel/torch-xpu-ops. Also this day: 200K cap rejected (max_model_len is a trajectory
+    axis; pool 441K -> 387K at 200K), u=0.88 adopted (pool 441.6K / 1.68x).
