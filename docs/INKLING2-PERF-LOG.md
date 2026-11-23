@@ -717,3 +717,22 @@ api=200
 
 Rollback: revert the two edits (MAX_BATCHED_TOKENS=2048 in the unit; remove the two --env lines from
 serve-inkling2-tp2.sh), daemon-reload, restart.
+
+
+### Addendum (Nov 22, later): 3072 REVERTED to 2048 per user decision
+
+The user reverted MAX_BATCHED_TOKENS to 2048 the same day (concurrency preference: 1.66x beats 1.23x
+for multi-request headroom); the defer-backing env stays. Post-revert production, verified: pool
+434,049 tokens / 1.66x, decode bands 96.8 / 93.1 / 114.0 tok/s, mirror still dead (GPUActive 0.59 GiB,
+MemAvailable 78.1 GiB), defer env confirmed in-container. Claude verify pass (V1-V5): unit/SETUP-copy/
+container/ladder-revert/fork-tree all consistent; the ladder file is byte-identical to its backup.
+
+**Pool-clarification the verify pass surfaced**: the old 641,028-token / 2.45x pool record (section 1)
+was measured in the FP8-KV era (24 KiB/token/card); the doc's own BF16 row reads 439,959 / 1.68x. Today's
+434,049 / 1.66x matches that BF16 row within 1.3% - the small delta is the fork's new CUDA-graph memory
+profiler (u0.85 behaves as 0.8438; u0.8562 would restore it, worth only a few thousand tokens - not
+applied). So bf16 production never had the 641K pool; 434K IS the bf16 ceiling under the current
+allocator behavior. 3072's real cost was 434K -> 323K tokens (-25%), not a mirror artifact.
+
+Also noted by verify: the production unit has Restart=no (a crash leaves the server down until manual
+restart - historical config, flagged here for awareness; not changed).

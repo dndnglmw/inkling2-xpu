@@ -313,3 +313,12 @@ unchanged, prefill +20.2% at 241K / +13.8% at 32K, MemAvailable 78 GiB under pro
 file is now version-controlled at SETUP/inkling2-prod.service. Rollback documented in PERF-LOG
 section 19. Prefill remains open on two kernel projects: split-KV global attention and tiered-MoE
 grouped-GEMM rework (next campaign).
+
+
+## 21. 3072 chunks reverted to 2048 (Nov 22, user decision)
+
+The 3072-chunk adoption lasted one session: the user preferred 1.66x concurrency (434K-token bf16 pool)
+over the +20.2% prefill at 241K. Defer-backing stays. The chunk-size option remains documented
+(+13.8% at 32K / +20.2% at 241K, bit-identical, 1.23x concurrency) and can be re-adopted by a one-line
+unit edit if the concurrency trade is ever acceptable. The verify pass also confirmed the 641K pool
+record was FP8-era and not comparable to any bf16 figure (PERF-LOG section 19 addendum).
