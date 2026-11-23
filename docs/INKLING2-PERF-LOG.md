@@ -995,3 +995,23 @@ share) remains impossible under the bit-exactness gate.
 Realistic gate-safe prefill total: ~+5-8% for S-M efforts. Also noted: decode with 9-32 tokens
 routes through the tiered path today (_SMALL_T=8 in moe.py) - relevant for any future path
 branching.
+
+### "Full 608 GB/s?" - decomposition answer (Nov 22, night): no for this op shape; LUT decode is the reachable ceiling; bf16-resident experts is the structural gate-safe trade
+
+Decomposition probe (agents/decomp_probe.py, w13 footprint 191 MB read / 680 MB write):
+(a) pure read 643 GB/s - the read path exceeds the 586 reference; (b) pure write bf16 475 GB/s -
+the WRITE ceiling on this stack is well below the read-dominated 586/608 figures; (d) dequant
+without scale multiply 2.66 ms ~= full dequant 2.91 ms - the scale is NOT the cost; the
+nibble->bf16 conversion chain is ~1.2 ms of ALU on top of the 1.43 ms write floor.
+
+Conclusions: (1) full 586/608 is mathematically unreachable for a 4.5:1 write:read elementwise
+op - the honest kernel asymptote is ~475 GB/s equiv (1.43 ms); (2) the reachable retune is
+LUT-based e2m1 decode (16-entry table replacing 5-8 ALU ops/element), bit-exact by construction
+(16x256 cross-product harness = exactly the exhaustive test Claude specified), landing ~1.7-1.9
+ms/visit => +3.5-4.5% prefill; (3) the true 608-class road is NOT materializing bf16 at all -
+fused dequant-in-register grouped GEMM (191 MB read, zero write, read-dominated profile =>
+586-class; F3zz1k's SYCL design) - gate-blocked; (4) the gate-safe structural equivalent:
+bf16-resident experts dequanted once at load (24.4 GB/card; dequant erased entirely, +17%
+prefill at 241K) costs pool 434K -> ~266K tokens (concurrency 1.66x -> ~1.15x) - raised for the
+operator, not recommended given the guarded concurrency preference; (5) partial cache via the
+existing INKLING_MOE_DEQ_CACHE_GB knob: +2-4% within current VRAM.
