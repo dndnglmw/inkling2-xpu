@@ -1144,3 +1144,6 @@ with explicit log capture, third time this lesson has applied.
     bit-exact; image answered correctly (finish=stop). New scope fact: KV pool size is not a
     trajectory axis. mm-boot pool cost ~0.6 GiB/card (434K -> 412K tokens, 1.66x -> 1.57x).
     Production unchanged (image:0); vision is a one-flag switch.
+    Production switched to image:1 the same day: gate re-verified on the production boot
+    (576/576 KL 0.0, 12/12), an unseen-image smoke answered correctly; pool 434,084 ->
+    412,587 tokens (1.66x -> 1.57x concurrency).

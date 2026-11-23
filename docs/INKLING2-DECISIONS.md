@@ -447,3 +447,9 @@ production stays image:0 by default - the mm boot costs ~0.6 GiB/card of KV pool
 not been asked for in production. The text-only trajectory is bit-identical under both
 configs (proven on this boot), so flipping the flag carries no re-verification burden beyond
 one gate run.
+
+Nov 23, later: production switched to image:1. The gate re-verified on the production boot
+path itself (576/576 KL 0.0, greedy 12/12), a fresh unseen image answered correctly
+(finish=stop), and the pool trade is accepted: 434,084 -> 412,587 tokens (1.66x -> 1.57x
+concurrency) in exchange for full model capability. Rollback = the .bak-image0 serve script
+plus a restart.
