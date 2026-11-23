@@ -780,7 +780,7 @@ sysfs max/current link training across both chains (unprivileged sysfs, max_link
 GPU0 chain: root port 00:01.1 = 32 GT/s x16 (Gen5 x16, training full) -> card switch (Intel e2ff)
 32 GT/s x16 -> GPU. GPU1 chain: root port 00:02.2 = **16 GT/s x4 (Gen4 x4)** -> card switch LnkCap
 32 GT/s x16 (the card is Gen5 x16 capable!) -> starved to Gen4 x4. The B65 cards are Gen5 x16
-devices; the B850M wired slot 2 to an M.2-grade CPU root port. This x4 uplink is the measured
+devices; the motherboard wired slot 2 to an M.2-grade CPU root port. This x4 uplink is the measured
 6.7 GB/s cross-copy ceiling (matches), and it caps all TP2 collectives today.
 
 Board-swap arithmetic (asked: "worth a pcie5 x8/x8 board?"): a second slot at >= 32 GB/s CPU-direct
