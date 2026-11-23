@@ -382,3 +382,20 @@ already deviates from the bs=1 reference. Production stays k=3 under the standin
 decision raised: keep bit-exactness (k3 permanent) / tolerance gate for shape noise / fund
 fixed-shape padded decode for true shape-invariance. Evidence: PERF-LOG gate-investigation
 section (this date); captures ab-quality-k2e/k7q/nospec.json vs ab-quality-bf16.json.
+
+### RESOLVED Nov 22: bit-exactness gate retained; k=3 permanent (operator decision)
+
+The operator chose option 1: the bit-exactness gate stands as written, k=3 is the permanent
+production spec depth. Consequences, stated plainly: (a) the depth menu (k7/k5/ladder-k5,
+blended +5.5..+8.2%, best-per-workload +18.2%) is closed; (b) adaptive verification is closed
+(it was L-size anyway); (c) the F3zz1k MoE NVFP4 kernel port is closed as an output-changing
+lever - a different GEMM reduction structure at the same shape perturbs outputs exactly like a
+shape change does, so it cannot pass this gate; (d) fusion/tile/overlap levers (allreduce
+overlap, pre_attn/pre_mlp fusion, attention tile sweep) are likewise gated out - they all
+reorder reductions. What SURVIVES the gate: output-preserving levers only - the DFlash2 drafter
+training project (a better drafter changes drafts, not verification: at num_spec=3 the verify
+shape stays the 4-row production shape, so the trajectory and outputs are unchanged while
+tok/step rises; estimated +10-14% decode, multi-day distillation project), memory-side tuning
+(pool/utilization), and the upstream kernel P2P unlock watch (prefill lever, environment-level).
+This is the endstate: quality is bit-pinned to the 4-row production trajectory; speed
+improvements must come from draft quality or memory, never from touching target-side numerics.
