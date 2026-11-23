@@ -1065,3 +1065,33 @@ read-dominated profile) is gate-blocked; (5) gate-safe structural alternative (b
 experts, +17% prefill) trades pool 434K -> ~266K - operator declined territory. The dequant
 kernel is DONE within the bit-exactness constraint; remaining gate-safe prefill items are the
 dequant cache wiring (+2-4%) and glue fusion (+1-2%).
+
+### Squeeze arc closed (Nov 22, late): CCL transport neutral, dequant cache dead - the box is at its gate-pinned optimum
+
+CCL transport A/B final: CCL_ATL_TRANSPORT=shm is invalid in this oneCCL build (ofi/mpi only);
+FI_PROVIDER=shm rejected ("not requested from CCL level"); the working knob is
+CCL_ATL_OFI_PROVIDER=shm (boots, serves). Matched-pair prefill (same corpus, same targets,
+CPT 2.86): shm 1941 @32K / 1649+1653 @204K vs baseline 1941 / 1648+1652 - IDENTICAL within
+0.2%. Bit-exactness 576/576, greedy 12/12 (2-rank sum commutativity confirmed empirically).
+Conclusion: the collective data path is not transport-bound end-to-end; the campaign's
+5 GB/s / 1.84 ms attribution was a microbenchmark figure, not exposed wall time. No gain, no
+harm - nothing to adopt.
+
+Dequant cache: dead by VRAM reality - the cards are 32 GB (31.89 GiB measured, not 48 as the
+early pool math assumed); free VRAM 5.85/6.37 GiB after boot collapses to 0.61/0.66 GiB after
+one 250K request (allocator high-water from prefill transients). The cache guard
+(free > need + 4 GiB) can never fill safely; even one pinned layer is an OOM risk at long
+context. The upstream default-OFF comment was written for exactly this deployment.
+
+Full squeeze tally under the bit-exactness gate: config space exhausted; LUT/rebias decode
+inapplicable (carry limitation, chain already minimal, +1.2% bound); dequant kernel surgery
+~+1.5% bound (M effort); dequant cache dead (VRAM); CCL transport dead (neutral); glue fusion
+(+1-2%, M effort, routing-logic risk) is the only surviving item and is marginal. The
+structural items (fused NVFP4 grouped GEMM ~2x MoE, adaptive verification +18% blended, depth
+menu) all sit behind the gate-policy decision of Nov 22. Production remains: k=3, ofi/tcp,
+434K pool, bit-pinned to the 4-row trajectory - the gate-pinned optimum.
+
+Ops lessons: (1) debug boots must not share port 8000 with a restore window (a debug boot held
+:8000 during a restoreprod and production failed to come up until the debug container was
+removed); (2) --rm containers vaporize docker logs on crash - debug boots use named containers
+with explicit log capture, third time this lesson has applied.
