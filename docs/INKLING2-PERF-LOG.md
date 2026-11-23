@@ -749,3 +749,26 @@ via a one-line unit edit; the fp8-dequant MoE path CLOSED by probe evidence (no 
 scaled_mm on this build; fp8 bmm measured SLOWER than bf16 at the tier shape, 3.99 vs 2.90 ms - the
 dequant bandwidth cost is structural on this stack). Remaining prefill polish: allreduce overlap
 (~3-5%), pre_attn/pre_mlp fusion (~3%), local-layer tile sweep (~1%).
+
+
+### Inter-GPU data path verified (Nov 22): no VRAM-to-VRAM P2P; cross-card traffic is host-staged at ~6.7 GB/s
+
+Direct probe (bench container, both devices visible): a 2 GiB cross-device copy runs at **6.6-6.7 GB/s**
+(same-device reference: 215.7 GB/s), with the GPUActive system-page counter flat on the first copy and
++4 GiB materializing on repeat - the signature of host-staged GTT backing, not fabric-routed P2P. This
+matches upstream compute-runtime#935: BMG cross-root-port P2PDMA is refused by the kernel, so L0
+dev-to-dev copies fall back to host staging.
+
+Topology (lspci/sysfs): both B65s are CPU-direct - GPU0 under Raphael root port 00:01.1, GPU1 under
+00:02.2, same host bridge (pci0000:00), each behind its own on-card Intel PCIe switch (e2ff -> e2f0).
+Same-host-bridge P2P would normally be permitted on AMD hosts; the blocker is the xe/L0 peer-copy
+implementation, not the board wiring (the CPU-direct assertion is correct).
+
+Implications: (a) TP2 compute is VRAM-local per card (586 GB/s measured local streaming) - the sharded
+weights/KV never round-trip; (b) ALL cross-card traffic (all-reduces, EP-routed tokens) traverses host
+DRAM at ~6.7 GB/s class - consistent with the measured 9.4 MB all-reduce at 1.84 ms; (c) the
+defer-backing fix mattered double here: peer access is host-staged BY DESIGN on this topology, so
+lazy-vs-eager pinning was the difference between usable and unusable host memory; (d) a future
+kernel/xe enabling BMG cross-root-port P2PDMA would raise the collective ceiling from ~6.7 to
+fabric-class rates (est. 20-50 GB/s), cutting the ~190 ms/chunk prefill allreduce exposure to
+~60-80 ms (+5-7% prefill) - a kernel-upgrade lever, not addressable from user space today.

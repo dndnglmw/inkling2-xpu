@@ -333,3 +333,13 @@ scales cannot be represented, so the GEMM would not be exact; and batched fp8 to
 SLOWER than bf16 at the tier shape (3.99 vs 2.90 ms; 170 vs 469 GB/s weight stream) - the fp8 path
 does not reach the fast XMX rate. The dequant bandwidth cost of the bmm+oneDNN design is structural.
 Remaining prefill items are small polish (allreduce overlap, fusions, local tile sweep; ~5-8% total).
+
+
+## 23. Cross-GPU P2P: unavailable on this topology (verified Nov 22)
+
+Both B65s are CPU-direct (separate Raphael root ports, same host bridge), but xe/L0 refuses
+cross-root-port P2PDMA on BMG (upstream #935) - measured: cross-device copy at 6.6-6.7 GB/s through
+host-staged GTT vs 215.7 GB/s same-device. All TP2 collective and EP traffic is host-mediated; the
+~6.7 GB/s ceiling explains the allreduce timings. Not user-space-fixable; a future kernel enabling BMG
+P2PDMA is the lever (PERF-LOG section 19 addendum for numbers). The defer-backing fix remains
+mandatory on this topology.
