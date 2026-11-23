@@ -791,3 +791,44 @@ dual-Gen5-x8 AM5 boards are rare (most give x16 + a x4 M.2-grade port - exactly 
 Gen4 x16 on the second slot equals Gen5 x8 and is equally fine; and the swap costs a full stack
 re-validation day. Verdict: worth it IF a suitable board is found at reasonable cost; not urgent
 enough for a platform (sTR5) move alone.
+
+### DSpark depth A/B (Nov 22): k=7 (full trained block) vs k=3 - content-dependent, not length-dependent
+
+Paired AB (phase2d protocol: deep4 x3 per cell, bf16 KV, mbt 2048, graphs on, NEODK=1 DEFER=0,
+SALT=7, ctx 8000+250000; run noise +-0.3%):
+
+| workload | k=3 | k=7 | delta | accept len k3->k7 | step ms k3->k7 |
+|---|---|---|---|---|---|
+| 8K code-continue | 89.9 tok/s | 113.0 | +25.7% | 3.18 -> 5.48 | 35.4 -> 48.5 |
+| 8K prose-summary | 90.1 | 79.4 | -11.9% | 2.94 -> 3.22 | 32.7 -> 40.6 |
+| 8K verbatim-quote | 107.5 | 126.4 | +17.6% | 3.50 -> 5.90 | 32.5 -> 46.7 |
+| 250K code-continue | 74.8 | 85.4 | +14.2% | 3.34 -> 5.28 | 44.6 -> 61.9 |
+| 250K prose-summary | 64.8 | 56.9 | -12.2% | 2.40 -> 2.55 | 37.2 -> 44.9 |
+| 250K verbatim-quote | 44.5 | 34.1 | -23.4% | 1.71 -> 1.77 | 38.4 -> 51.9 |
+
+Findings: (1) The earlier depth-4 "collapse" was an artifact of measurement era/confounds - at the
+full trained block (mtp_config.block_size=8, k=7) the drafter accepts deep positions readily
+(5.9 tok/step on predictable spans; per-position rates 0.95/0.82/0.70/0.64/0.58/0.38/0.34 in the
+best windows). Our fork shrinks draft_block_size to num_spec+1; F3zz1k's fork hard-requires the
+trained block. (2) The depth optimum is CONTENT-dependent, not context-length-dependent: 250K
+code-continue accepts deeply (5.28/step, nearly its 8K rate) while 250K verbatim accepts nothing
+deep (1.77 vs 1.71 - flat), making depth 7 pure verify-cost waste there (-23.4%). A
+context-length ladder would mis-schedule both; drafter confidence is the correct signal.
+(3) Static k=7 is NOT adoptable (spread -23%..+26% by workload); production stays k=3.
+Best-of-both per workload = +11% blended over static k=3 (static k=7 alone: +5.5%).
+Next lever: enable_adaptive_verification (in-fork, DSpark-specific, config-only; online
+acceptance estimator cold-started on Inkling among five models; variable-length verify path).
+Protocol lesson: deep4's python stdout flushes at process exit - output blocks in driver logs
+attribute to the PREVIOUS marker, not the adjacent one (today's interim misattribution).
+
+F3zz1k-port assessment (Claude consult + local read, Nov 22): native kernel package
+(b70/inkling2-kernels, ~7.9 kloc) is B65-compatible (generic Xe2 DPAS atom, runtime XMX query,
+no SKU gating; rebuild against torch 2.15). Integration = two ops (rel_attention,
+grouped_gemm_nvfp4); our weight storage is byte-identical NVFP4 (pack 2 / group 16) so the GEMM
+reads our tensors as-is. Expected B65 gains: MoE grouped GEMM ~2x per visit (11.37 -> ~4.5-6 ms,
+dequant round-trip eliminated - architecture-independent); attention 0-25% on the 85 ms global
+path (uncertain, same vendor mainloop + fused bias); int8 dense fails the zero-drift gate
+(top-1 0.994). Our KV pages are already 64 (his kernels' requirement). His multi-card P2P works
+via one PCIe switch + iommu=pt + ACS off - ours are on separate root ports (kernel-refused).
+Port order: k=7/adaptive first (config), MoE GEMM, attention, int8 last. Also queued: his
+CCL_SYCL_*_TMP_BUF envs (oneCCL host-memory leak fix) - not yet tested.

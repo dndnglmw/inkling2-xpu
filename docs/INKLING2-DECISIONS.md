@@ -343,3 +343,15 @@ host-staged GTT vs 215.7 GB/s same-device. All TP2 collective and EP traffic is 
 ~6.7 GB/s ceiling explains the allreduce timings. Not user-space-fixable; a future kernel enabling BMG
 P2PDMA is the lever (PERF-LOG section 19 addendum for numbers). The defer-backing fix remains
 mandatory on this topology.
+
+
+## 24. DSpark depth: content-adaptive, not length-adaptive (A/B Nov 22)
+
+The bundled drafter is an 8-row block (mtp_config.block_size=8) and accepts deep positions when
+run at full depth: k=7 beats k=3 by +26%/+14% (code-continue 8K/250K) and +18% (verbatim 8K), but
+LOSES -12% (prose) and -23% (verbatim 250K, flat deep acceptance). The depth optimum tracks
+drafter confidence (content predictability), not context length. Static k=7 is not adoptable;
+production stays k=3 until adaptive verification (enable_adaptive_verification, in-fork,
+DSpark-only, config-only) is A/B'd - expected best-of-both ~+11% blended. F3zz1k's k=7 result
+explained: full-block drafter + native draft attention. Kernel-port order settled: MoE NVFP4
+grouped GEMM first (~2x/visit), attention second, int8 last (gate). Full table in PERF-LOG.
