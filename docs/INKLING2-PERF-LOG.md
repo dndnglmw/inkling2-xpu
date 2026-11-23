@@ -957,3 +957,41 @@ Realistic gate-safe prefill ceiling: ~+8-12% (dequant retune + sync elimination 
 Time budget per 2048-token chunk at 241K: ~1288 ms total, MoE ~545 ms (48 visits x 11.37 ms), of
 which dequant-write 189 ms, bmm weight re-read ~110 ms, DPAS ~163 ms, epilogues/gather/sync the
 rest.
+
+### Prefill research addendum (Claude consult 11 + corrected sweep): config space exhausted; final bit-exact menu
+
+Claude verified the candidates against the code: C1 bit-exactness CONFIRMED (_deq_tile purely
+elementwise, no atomics/order dependence) but gain tempered (dequant is ~34% of the 11.37 ms
+visit, so kernel ceiling ~+3-4%); C2 fixed-cap tiers REJECTED (heavy-tailed routing up to 2048
+rows/expert makes padding cost dominate; a few fixed tiers is just the ladder again); C3 AR
+overlap REJECTED (model.py is strictly serial - every AR output is the next op's input, nothing
+to hide behind) with a critical correction: changing the AR path is NOT automatically bit-safe
+(_sum_gathered rounds once in fp32 vs XCCL bf16 adds - double-rounding differs), and the
+existing _e2m1_fast/_e4m3_fast decoders being "not faster" argues the bottleneck is not decoder
+ALU.
+
+Config sweep with corrected grids (the first sweep's k13//bk integer-division grid silently
+covered only 2048/2304 k-positions - the "418 GB/s" was 11% less work; dq_diff.py with cdiv
+grids shows ZERO differing elements at every tile shape): all 15 configs bit-exact, none beats
+production's BM=32/BK=256/nw=4 (338/353 GB/s). The kernel is NOT config-bound; the gap to 586
+GB/s needs code surgery (uint32-vectorized packed loads - current loads are 128 B/row u8
+gathers; store vectorization after tl.interleave) with uncertain payoff.
+
+FINAL bit-exact prefill menu (post-Claude):
+1. Dequant-cache wiring: INKLING_MOE_DEQ_CACHE_GB exists (triton_moe_grouped.py:249), tiered
+   path never uses it. Weights are static and re-dequanted every chunk (~118 chunks at 241K).
+   VRAM-limited to ~20-25% of the weight set next to KV => +2-4% prefill. S-M effort. Biggest
+   remaining exact win per Claude.
+2. Dequant kernel code retune (vectorized loads/stores): +2-4% IF 400-450 GB/s is reachable,
+   M effort, uncertain - exhaustive harness required (16 nibbles x 256 e4m3 cross-product +
+   real-weights bitwise incl. tails and 0x7F NaN byte).
+3. MoE glue fusion (argsort/cumsum/scatter/o13-gather per visit - integer-exact, launch-count
+   reduction): +1-2%. S effort.
+Dead: fixed-cap sync elimination (padding cost), AR overlap (serial dependency), config-space
+sweep (exhausted), cross-visit dequant reuse (32 GB), persistent full cache (16 GB). Structural
+fused NVFP4 grouped GEMM (removes the 2.7 GB/visit weight round trip - would be ~2x on the MoE
+share) remains impossible under the bit-exactness gate.
+
+Realistic gate-safe prefill total: ~+5-8% for S-M efforts. Also noted: decode with 9-32 tokens
+routes through the tiered path today (_SMALL_T=8 in moe.py) - relevant for any future path
+branching.
