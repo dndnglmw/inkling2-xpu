@@ -736,3 +736,16 @@ allocator behavior. 3072's real cost was 434K -> 323K tokens (-25%), not a mirro
 
 Also noted by verify: the production unit has Restart=no (a crash leaves the server down until manual
 restart - historical config, flagged here for awareness; not changed).
+
+
+### Prefill re-measure on the reverted config (Nov 22): the mirror fix alone recovered +7.3% at 241K
+
+prefill_bench on production (2048 chunks + defer-backing off, bf16): 1882 tok/s at 32K (first run,
+near-steady) and **1588 tok/s at 241K** vs 1480 pre-fix (+7.3%). Part of the old config's depth cliff
+(1714 -> 1480 from 128K to 241K) was the mirror itself - long prefills drove the heaviest peer-pinning
+and host-side pressure. The depth cliff is now largely gone at 2048 chunks, with the 1.66x concurrency
+intact. Standing options on record: 3072 chunks (2197 / 1797 / 1779, +20.2% at 241K, 1.23x concurrency)
+via a one-line unit edit; the fp8-dequant MoE path CLOSED by probe evidence (no per-16 scale support in
+scaled_mm on this build; fp8 bmm measured SLOWER than bf16 at the tier shape, 3.99 vs 2.90 ms - the
+dequant bandwidth cost is structural on this stack). Remaining prefill polish: allreduce overlap
+(~3-5%), pre_attn/pre_mlp fusion (~3%), local-layer tile sweep (~1%).

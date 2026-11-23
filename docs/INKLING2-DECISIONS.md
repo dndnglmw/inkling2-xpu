@@ -322,3 +322,14 @@ over the +20.2% prefill at 241K. Defer-backing stays. The chunk-size option rema
 (+13.8% at 32K / +20.2% at 241K, bit-identical, 1.23x concurrency) and can be re-adopted by a one-line
 unit edit if the concurrency trade is ever acceptable. The verify pass also confirmed the 641K pool
 record was FP8-era and not comparable to any bf16 figure (PERF-LOG section 19 addendum).
+
+
+## 22. fp8-dequant MoE project: CLOSED by probe (Nov 22)
+
+The proposed fp8 tiered-MoE path (dequant to fp8 + fp8 GEMM to halve the ~192 GB/chunk dequant
+traffic) is dead on this stack, measured: torch._scaled_mm exists and supports per-tensor and rowwise
+scales but REJECTS e8m0/MX-style block scales ("Invalid scaling configuration") - the NVFP4 per-16
+scales cannot be represented, so the GEMM would not be exact; and batched fp8 torch.bmm works but is
+SLOWER than bf16 at the tier shape (3.99 vs 2.90 ms; 170 vs 469 GB/s weight stream) - the fp8 path
+does not reach the fast XMX rate. The dequant bandwidth cost of the bmm+oneDNN design is structural.
+Remaining prefill items are small polish (allreduce overlap, fusions, local tile sweep; ~5-8% total).
