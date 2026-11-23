@@ -687,3 +687,33 @@ behavior on 26.40 (Nov 13). This box is kernel 7.0.0-44, so the runtime upgrade 
 suffice here. The env is therefore the pragmatic, verified fix with upstream tracking; the
 passthrough in run-ab.sh is inert unless NEOReadDebugKeys=1 is set (all other windows and boots ran
 with it off).
+
+
+## 19. Production update: 3072 chunks + defer-backing off (Nov 22, ADOPTED)
+
+Adopted into production after the full verification chain (both changes bit-identical, gate 576/576
+top-1 / KL 0.00000 on shared top-20 for each):
+- **EnableDeferBacking=0 + NEOReadDebugKeys=1** forwarded into the container by
+  serve-inkling2-tp2.sh (compute-runtime #953 workaround; section 18). Production post-restart:
+  MemAvailable 78.09 GiB, GPUActive 0.59 GiB - mirror gone in production.
+- **MAX_BATCHED_TOKENS 2048 -> 3072** in the inkling2-prod unit (SETUP/inkling2-prod.service now
+  version-controls the unit file). Prefill end to end with the fix: 2197 / 1797 / 1779 tok/s at
+  32K / 128K / 241K vs the prior 1931 / 1714 / 1480 (+13.8% / +4.8% / +20.2%), flat across depth
+  where the old config fell off a cliff. KV pool 323,577 tokens = 1.23x concurrency at 262144
+  (guard passes; down from 2.45x at 2048 chunks - the price of the chunk size). Decode bands on the
+  new config: 97.7 / 83.1 / 113.8 tok/s - unchanged, as expected.
+- The 4096-chunk boot still fails on bf16 even with the mirror fix (engine-init failure: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+[11-22 15:57:08] === 3072 boot (no --rm) ===
+started: method=dspark kv=bf16 depth=3 mbt=3072 graph=1 gu=0.85  (log /tmp/inkling-ab-serve.log)
+[11-22 15:59:10] restoring production
+active
+api=200
+[11-22 16:00:55] DIAG-BOOTS COMPLETE
+...
+  Not investigated further - 3072 captures most of the chunk gain and the pool guard passes).
+- Boot-log hint for later: the fork's new CUDA-graph memory profiler reports u0.85 now behaves as
+  0.8438 and suggests u0.8562 to restore the prior effective KV size. Not applied (pool passes the
+  guard); a candidate micro-tweak if the pool ever matters again.
+
+Rollback: revert the two edits (MAX_BATCHED_TOKENS=2048 in the unit; remove the two --env lines from
+serve-inkling2-tp2.sh), daemon-reload, restart.

@@ -304,3 +304,12 @@ NEOReadDebugKeys=1 EnableDeferBacking=0 - GPUActive 51.10 -> 0.57 GiB at boot, M
 26.5 -> 74.5 GiB, no load growth, deep4 bands normal, exactness gate 576/576 (KL(defer0||bf16) over shared top-20: mean 0.00000  max 0.00000  (576 positions)).
 Adoption decision (debug-key caveat + kernel-7.0 residual upstream) recorded with the data in
 PERF-LOG section 18.
+
+
+## 20. Production config: 3072 chunks + defer-backing off (ADOPTED Nov 22)
+
+Adopted after gate-verified verification (bit-identical outputs on both changes, decode bands
+unchanged, prefill +20.2% at 241K / +13.8% at 32K, MemAvailable 78 GiB under production). The unit
+file is now version-controlled at SETUP/inkling2-prod.service. Rollback documented in PERF-LOG
+section 19. Prefill remains open on two kernel projects: split-KV global attention and tiered-MoE
+grouped-GEMM rework (next campaign).
