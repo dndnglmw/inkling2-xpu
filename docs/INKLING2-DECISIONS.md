@@ -355,3 +355,17 @@ production stays k=3 until adaptive verification (enable_adaptive_verification, 
 DSpark-only, config-only) is A/B'd - expected best-of-both ~+11% blended. F3zz1k's k=7 result
 explained: full-block drafter + native draft attention. Kernel-port order settled: MoE NVFP4
 grouped GEMM first (~2x/visit), attention second, int8 last (gate). Full table in PERF-LOG.
+
+
+## 25. Depth map: no dominant static config; ladder semantics verified; adaptive parked as L
+
+Four-config depth A/B (k3 / shrunken-k5 / ladder-k5 native-block / k7, deep4 x3 each): blends
+78.6 / 85.0 / 84.4 / 82.9 tok/s, but per-workload optima differ (code->k7, prose-250K->shrunken
+k5, verbatim-8K->ladder-k5 record 139.0, prose-8K/verbatim-250K->k3). Block-shrink distortion
+proven: native-block drafts accept 2.74 where shrunken-4-row accepts 1.71 on verbatim-250K.
+Production stays k=3 pending a traffic-mix call: shrunken-k5 (+8.2% blended, worst cell -15% on
+verbatim-250K) vs ladder-k5 (+7.3% blended, worst cell -15% on 250K prose) vs k7 for code-heavy
+mixes. Adaptive verification = the measured +18.2%-blended prize but L-size on our XPU backend
+(host-side metadata planning; silent-corruption risk) - parked as a campaign; estimator-alone
+(needs no confidence head) confirmed. Ladder config verified working on dspark/XPU for the
+concurrency axis.

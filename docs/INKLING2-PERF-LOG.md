@@ -832,3 +832,45 @@ path (uncertain, same vendor mainloop + fused bias); int8 dense fails the zero-d
 via one PCIe switch + iommu=pt + ACS off - ours are on separate root ports (kernel-refused).
 Port order: k=7/adaptive first (config), MoE GEMM, attention, int8 last. Also queued: his
 CCL_SYCL_*_TMP_BUF envs (oneCCL host-memory leak fix) - not yet tested.
+
+### Depth map completed + ladder semantics verified (Nov 22, later session)
+
+Static ladder test (native 8-row draft block via num_spec=7 + Dynamic SD ladder [[1,512,5]],
+verify trimmed to 5; pool 434,809 = k7-native-block pool; ladder engages cleanly on dspark/XPU):
+
+| workload | k3 (prod) | k5 shrunken | k5 ladder (native) | k7 |
+|---|---|---|---|---|
+| 8K code | 89.9 | 96.2 | 100.0 | 113.0 |
+| 8K prose | 90.1 | 86.4 | 81.3 | 79.4 |
+| 8K verbatim | 107.5 | 127.5 | 139.0 | 126.4 |
+| 250K code | 74.8 | 79.1 | 84.0 | 85.4 |
+| 250K prose | 64.8 | 82.9 | 54.9 | 56.9 |
+| 250K verbatim | 44.5 | 37.8 | 47.0 | 34.1 |
+| blend (6 cells, equal wt) | 78.6 | 85.0 | 84.4 | 82.9 |
+
+All cells n=3, +-0.5% run noise; SALT=7 deep4 protocol throughout. Findings: (1) BLOCK-SHRINK
+DISTORTION PROVEN - the native walk's first 5 positions accept 2.74 tok/step on verbatim-250K
+where the shrunken 4-row walk accepts 1.71 (k3) and the full 8-row verify accepts 1.77 (k7):
+shorter draft blocks poison draft quality itself, not just depth (ladder windows show exact
+0.000 at unverified positions 6-7, confirming trim-not-shrink semantics). (2) Ladder-k5 sets the
+single-cell record (8K verbatim 139.0, +29% over k3) and nearly matches k7 on 250K code at 13%
+less step cost. (3) No config dominates: the ladder variant loses prose (-34% vs shrunken k5 on
+250K prose); the depth/block-size optimum is content-dependent and non-monotonic. (4) Best
+per-workload across the four configs = +18.2% blended over k3 - the adaptive-verification prize,
+now measured.
+
+Adaptive verification (per-request budgets) disposition: the online acceptance estimator can
+drive budgets with NO trained confidence head (estimator writes draft_token_confidence_probs
+itself; `use_acceptance_estimator` path in spec_decode/speculator.py:256-340, predict at :662,
+feature = log-odds of draft logits) and the subclass fix is ~10 lines (relax assert at
+models/inkling2/speculator.py:21 + force the logits path so `_maybe_predict_acceptance` fires;
+greedy branch bypasses it today). BUT the target side is L: INKLING_XPU attention + sconv
+metadata plan from host-side CPU query lengths (.tolist() at xpu/attention.py:223,
+triton_attention.py:358-414, sconv_state.py:68-80; UNIFORM_BATCH; no
+get_varlen_cudagraph_max_query_len) - device-decided per-request trimming would silently
+corrupt sconv state mapping, and maybe_create_adaptive_verification_manager raises at startup
+anyway (adaptive_verification.py:~640). Correctly parked as a queued campaign: device-side
+query-len planning + ragged-tolerant near-attention + varlen graph capture + rejection-sampler
+assert check (sample/rejection_sampler.py:343). Fallback ladder (num_speculative_tokens_per_batch_size)
+is scheduler-level, batch-keyed, uniform-shape - works today but cannot express content
+dependence; useful for the concurrency axis only.
