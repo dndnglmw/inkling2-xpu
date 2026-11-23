@@ -1015,3 +1015,31 @@ bf16-resident experts dequanted once at load (24.4 GB/card; dequant erased entir
 prefill at 241K) costs pool 434K -> ~266K tokens (concurrency 1.66x -> ~1.15x) - raised for the
 operator, not recommended given the guarded concurrency preference; (5) partial cache via the
 existing INKLING_MOE_DEQ_CACHE_GB knob: +2-4% within current VRAM.
+
+### Intel-repo research (Nov 22, night): the rebias decode technique replaces the LUT plan
+
+Swept what Intel is shipping: vllm-xpu-kernels is at v0.1.18 nightlies (we run 0.1.16.2) with
+MxFP4 quantization/GEMM and a merged XE3P MoE grouped GEMM (#583) - relevant only to the gated
+fused path. intel-xpu-backend-for-triton v3.9.0 (OUR triton build) already carries the masked-
+store vectorization (#7577), AnnotateCacheControl default-on, and eviction-policy/LSC store
+modes - and we still measure 320 GB/s, confirming decode ALU as the remaining cost.
+
+THE FIND: PR #7040 (merged Jun 2026, in our 3.9.0 lineage for fp8 casts) replaced fp8e4m3->bf16's
+100-op subnormal-table + select chain with a 42-op i16-mask + single bf16 fmul-by-2^120 rebias:
+-50% per-element cast latency, -59.4% in the KV->bf16->dot pipeline, validated BIT-EXACT across
+all 256 byte values (pytest) with a lit FileCheck pinning the IR shape. Technique: place the
+source exponent bits into the bf16 exponent field via i16-domain shifts/masks, then one fmul
+rebias normalizes the exponent offset. Two gotchas documented upstream: use the i16 domain (the
+i32 form hits a PVC IGC FTZ bug), and the fmul needs native bf16 arithmetic (LTS drivers lack it
+- #7077 wrong for 254/256 values, gated by #7079 on ttig.support_bfloat16_arithmetic; our stack
+runs bf16 compute everywhere so the capability is present, verify at build time).
+
+PLAN CHANGE: the LUT prototype becomes a REBIAS prototype - rebuild _deq_tile's e2m1 decode as
+i16-mask bit-placement + single bf16 fmul rebias + short 16-value select chain for e2m1's
+subnormal cases. Verification: 16 nibbles x 256 scale bytes exhaustive cross-product bit-exact vs
+the current kernel + real checkpoint weights per layer (the #7040 harness pattern exactly).
+Expected -40-50% decode ALU => dequant ~2.91 -> ~2.3-2.5 ms/visit => +2-3.5% prefill (the 475
+GB/s write ceiling caps more). Watch list for the gated future: #4327 (matmul-with-dequantization
+pattern) and #8628 (SLM-staged decoded dot operands, merged Nov 11) - Intel is building fused
+dequant-dot into the compiler; vllm-xpu-kernels 0.1.16.2 -> 0.1.18 upgrade relevant only if the
+gate ever reopens.
