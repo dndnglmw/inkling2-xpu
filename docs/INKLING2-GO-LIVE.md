@@ -271,3 +271,5 @@ Code and data:
 
 See DECISIONS §9. In short: the Inkling-vs-Qwen quality and verbosity comparison, the `switch-stack.sh` rewrite,
 and the items from the upstream list that were never tried.
+
+Vision (Nov 23): the tower is ported and gate-clean; enable with --limit-mm-per-prompt '{"image": 1}' - text stays bit-exact (DECISIONS section 27).

@@ -11,6 +11,7 @@ the looped cross-pass message controllers.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
@@ -32,7 +33,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsEagle3, SupportsMultiModal
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsMultiModal,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..configs import Inkling2MMConfig, Inkling2ModelConfig
@@ -555,13 +561,22 @@ class _XPULogitsProcessor(LogitsProcessor):
 
 
 
+_IMAGE_PAD_ID = 200054  # image placeholder token id; must match processing.IMAGE_PAD_ID
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     Inkling2MultiModalProcessor,
     info=Inkling2ProcessingInfo,
     dummy_inputs=Inkling2DummyInputsBuilder,
 )
 class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsEagle3):
-    """Inkling 2 Mini for XPU (text-only; the vision tower is not ported)."""
+    """Inkling 2 Mini for XPU (text and images; vision tower ported from the reference XPU implementation)."""
+
+    # Keep raw input_ids through the runner: the model embeds internally (inside
+    # the captured decode graph, exactly like text-only boots) and overlays the
+    # runner-merged multimodal embeddings itself. Without this, mm-active boots
+    # embed outside the graph and every decode forward diverges bit-wise.
+    requires_raw_input_tokens = True
 
     packed_modules_mapping: dict[str, list[str]] = {}
 
@@ -593,6 +608,14 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         assert vllm_config.parallel_config.pipeline_parallel_size == 1
         self.config = config
         self.text_config = text_config = config.text_config
+        mm = vllm_config.model_config.multimodal_config
+        self.visual = None
+        _force_visual = os.environ.get("VLLM_INKLING2_FORCE_VISUAL") == "1"
+        if (getattr(config, "vision_config", None) is not None
+                and (_force_visual or (mm is not None and mm.get_limit_per_prompt("image")))):
+            from .vision import Inkling2VisionEncoder
+
+            self.visual = Inkling2VisionEncoder(config.vision_config, text_config.hidden_size)
         model_cls = (
             Inkling2XPULoopModel if text_config.loop_config is not None else Inkling2XPUModel
         )
@@ -619,11 +642,13 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             return IMAGE_PLACEHOLDER
         raise ValueError("Only image modality is supported")
 
-    def embed_multimodal(self, **kwargs: object):
-        raise NotImplementedError(
-            "The Inkling2 vision tower is not ported to XPU yet; "
-            "serve text-only with --limit-mm-per-prompt '{\"image\": 0}'"
-        )
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        patches, grid_thw = kwargs.get("vision_pixels"), kwargs.get("vision_grid_thw")
+        if patches is None or grid_thw is None:
+            return ()
+        assert isinstance(patches, torch.Tensor) and isinstance(grid_thw, torch.Tensor)
+        assert self.visual is not None
+        return self.visual(patches, grid_thw).split(grid_thw.prod(-1).tolist())
 
     def embed_input_ids(
         self,
@@ -635,7 +660,10 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         inputs_embeds = self.model.embed_input_ids(input_ids)
         if not multimodal_embeddings:
             return inputs_embeds
-        raise NotImplementedError("Inkling2 multimodal inputs are not supported on XPU")
+        assert is_multimodal is not None
+        return _merge_multimodal_embeddings(inputs_embeds=inputs_embeds,
+                                            multimodal_embeddings=multimodal_embeddings,
+                                            is_multimodal=is_multimodal)
 
     def forward(
         self,
@@ -648,7 +676,27 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         if inputs_embeds is None:
             assert input_ids is not None
             inputs_embeds = self.model.embed_input_ids(input_ids)
-        return self.model(positions, inputs_embeds)
+            return self.model(positions, inputs_embeds)
+        # requires_raw_input_tokens path (mm-active boots): the runner passes the
+        # merged embeds alongside input_ids. Re-embed the tokens here (identical
+        # ops to text-only boots, inside the graph) and overlay the encoder
+        # outputs at the image rows only. Text rows of the runner embeds are
+        # bit-identical to this re-embed, so the overlay is inert for them.
+        assert input_ids is not None
+        embeds = self.model.embed_input_ids(input_ids)
+        # While the stream is capturing, skip the overlay entirely: host syncs
+        # (.any()) are illegal during capture (level_zero error 44), and the
+        # captured decode graph must stay byte-identical to text-only boots.
+        # Decode rows never carry image embeddings (image tokens live in the
+        # prompt KV cache), so this is semantically exact; eager prefill steps
+        # below apply the overlay for real image rows.
+        if not torch.cuda.is_current_stream_capturing():
+            mask = input_ids == _IMAGE_PAD_ID  # image placeholder rows
+            if bool(mask.any()):
+                overlay = inputs_embeds[: embeds.shape[0]].to(embeds.dtype)
+                cond = mask.unsqueeze(-1).expand_as(embeds).contiguous()
+                embeds = torch.where(cond, overlay, embeds)
+        return self.model(positions, embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
@@ -663,9 +711,14 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         }
         loaded: set[str] = set()
         loaded_shards: set[tuple[str, int]] = set()
+        visual_items: list[tuple[str, torch.Tensor]] = []
         for name, weight in weights:
-            if name.startswith("model.visual.") or not name.startswith("model."):
-                continue  # vision tower; mtp.safetensors (draft weights, loaded by the speculator)
+            if name.startswith("model.visual."):
+                if self.visual is not None:
+                    visual_items.append((name[len("model.visual."):], weight))
+                continue  # vision tower (loaded via self.visual below); mtp.safetensors skipped
+            if not name.startswith("model."):
+                continue  # mtp.safetensors (draft weights, loaded by the speculator)
             for old, new in self._renames:
                 name = name.replace(old, new)
             shard_id = None
@@ -693,6 +746,8 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             else:
                 loader(param, weight, shard_id)
                 loaded_shards.add((name, shard_id))
+        if self.visual is not None and visual_items:
+            loaded |= {f"visual.{n}" for n in self.visual.load_weights(visual_items)}
         # The fused qkvr weight carries a trailing alignment-pad shard that the
         # checkpoint never provides: fill it with zeros so rows are defined and
         # the loader's per-shard bookkeeping sees it as loaded.

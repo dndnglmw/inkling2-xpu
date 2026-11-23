@@ -1131,3 +1131,16 @@ with explicit log capture, third time this lesson has applied.
     gate-pinned optimum. 1941 tok/s @32K / 1589 @249K prefill, 90-114 tok/s decode at
     3.4 tok/step. Watch list: Intel #8628/#4327 (compiler fused dequant-dot), kernel BMG P2P
     unlock, DFlash2 training (planning).
+
+11. Vision port (Nov 23): tower + processor wired from the community reference (F3zz1k's
+    vision.py, plain-torch eager encoder, no new kernels). Gate journey: image-enabled boot
+    deviated 495/576 (KL 0.386, deterministic) -> pool size ruled out (--kv-cache-memory-bytes
+    pin to 412,829 on an image-0 boot: bit-exact), resident tower weights ruled out (forced
+    build on image-0: bit-exact), resolved configs byte-identical, tokenization identical ->
+    root cause: the runner's uses_inputs_embeds mode under mm embeds OUTSIDE the captured
+    decode graph (unfused) -> fixed with requires_raw_input_tokens (model re-embeds inside the
+    graph; eager-only image-row overlay; capture-guarded - host syncs are illegal during
+    level-zero capture, error 44). Final: image-enabled boot text gate 576/576 KL 0.0
+    bit-exact; image answered correctly (finish=stop). New scope fact: KV pool size is not a
+    trajectory axis. mm-boot pool cost ~0.6 GiB/card (434K -> 412K tokens, 1.66x -> 1.57x).
+    Production unchanged (image:0); vision is a one-flag switch.

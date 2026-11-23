@@ -399,3 +399,51 @@ tok/step rises; estimated +10-14% decode, multi-day distillation project), memor
 (pool/utilization), and the upstream kernel P2P unlock watch (prefill lever, environment-level).
 This is the endstate: quality is bit-pinned to the 4-row production trajectory; speed
 improvements must come from draft quality or memory, never from touching target-side numerics.
+
+## 27. Vision tower port adopted - gate-clean via requires_raw_input_tokens (Nov 23)
+
+The checkpoint ships a full PE-Lang-style ViT tower (46 tensors, 0.593 GiB) plus a complete
+image processor; the fork served text-only with an explicit stub. Ported the tower from the
+community reference implementation (F3zz1k's vision.py copied verbatim, 315 lines: a
+plain-torch eager encoder, no new kernels, runs once per image), wired embed_multimodal and
+the load_weights visual routing. Three boot bugs fixed on the way: a duplicated-def splice
+from the first patch, the loaded-names prefix (encoder params register as visual.*, not
+model.visual.*), and a second stub - the top-level embed_input_ids raised on multimodal
+inputs; wired the standard _merge_multimodal_embeddings.
+
+First gate run on an image-enabled boot failed 495/576 (KL mean 0.386, bit-stable across
+boots) while vision itself answered correctly ("a red circle"). Ruled out, in order: request
+poisoning (a suite-first run reproduced the deviation digit-for-digit, so it was config, not
+state); KV pool size (an image-0 boot pinned via --kv-cache-memory-bytes to the mm boot's
+exact 412,829-token pool scored 576/576 bit-exact - pool size is NOT a trajectory axis); the
+tower's resident weights (a forced-tower image-0 boot: 576/576 bit-exact); resolved engine
+configs (byte-identical between image-0 and image-1 boots); and text tokenization
+(short-prompt ptoks identical across all boots; the needle-prompt ptoks differences are a
+harness artifact - random filler per run). Root cause found in the boot log: with mm active
+the speculator warns "draft model does not support external multimodal embeddings" and the
+runner switches to uses_inputs_embeds mode - embeddings are built by
+encoder_runner.get_inputs_embeds OUTSIDE the captured decode graph, so the in-graph embedding
+(which graph-pass fusion treats, e.g. fuse_norm_quant) is replaced by an unfused eager
+variant, and every decode forward diverges bit-wise from position 0. The drafter is
+unaffected: it receives text-only draft inputs on both boot types (supports_mm_inputs is
+false either way).
+
+Fix: requires_raw_input_tokens = True on the model class. The runner keeps input_ids; the
+model re-embeds internally (identical ops, inside the graph - captured decode graphs are
+byte-identical to text-only boots) and overlays the runner-merged embeddings only at image
+placeholder rows (token id 200054), inert for text rows. The overlay is guarded by
+torch.cuda.is_current_stream_capturing(): host syncs (.any()) are illegal during level-zero
+capture (UR_RESULT_ERROR_UNSUPPORTED_FEATURE 44 - two boots burned on this; the traceback
+pointed at the .any() line, initially misread as a broadcast-torch.where limitation), and
+decode rows never carry image embeddings anyway (image tokens live in the prompt KV cache),
+so skipping the overlay during capture is semantically exact while eager prefill applies it.
+The broadcast-where was also replaced with an expand+contiguous same-shape where as a
+precaution.
+
+Verified on the image-enabled boot: text gate 576/576 KL 0.0 (bit-exact), image smoke answers
+correctly with finish=stop. Vision is a one-flag switch (--limit-mm-per-prompt image:1);
+production stays image:0 by default - the mm boot costs ~0.6 GiB/card of KV pool (434,084 ->
+412,587 tokens, 1.66x -> 1.57x concurrency) for the tower and encoder cache, and vision has
+not been asked for in production. The text-only trajectory is bit-identical under both
+configs (proven on this boot), so flipping the flag carries no re-verification burden beyond
+one gate run.

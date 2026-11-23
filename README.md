@@ -77,7 +77,7 @@ documents the setup as actually operated, including what is *not* done.
   hits).
 - 1M context is **ruled out**: a 1M server hung the 91 GB host; 262,144 is the
   production cap.
-- Prefill runs eager (graphs are decode-only); images disabled.
+- Prefill runs eager (graphs are decode-only); image support ported (text stays bit-exact on image-enabled boots - docs/INKLING2-DECISIONS.md section 27).
 - Long-context acceptance drops for verbatim quotes from far-back text.
 - Numbers depend on topology (one card sits on a PCIe Gen4 x4 link).
 
