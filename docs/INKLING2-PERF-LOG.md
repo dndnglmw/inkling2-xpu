@@ -926,3 +926,34 @@ for every depth and concurrency. Prerequisite for reopening the depth menu under
 gate; also the template for gating the F3zz1k MoE port (his grouped GEMM must additionally be
 bit-identical to dequant+bmm at the SAME shape to pass unmodified - otherwise the gate question
 applies to it too).
+
+### Prefill kernel research (Nov 22, evening): three bit-exact candidates worth ~8-12%, structural big one gated
+
+Post-decision constraint: only bit-exact optimizations qualify (elementwise-exact work, memory
+movement, sync elimination, TP2 two-rank sums which are order-free). Probes run
+(agents/prefill_probe.py, bmm_inv.py, bench container):
+
+1. Dequant kernel measured: w13 320 GB/s, w2 359 GB/s vs 586 streaming - elementwise-exact math
+   (no reduction), so a retuned schedule (wider vector loads, packed nibble processing, ILP) with
+   IDENTICAL outputs is gate-safe. Today 3.93 ms/visit (x48 = 189 ms/chunk); at ~540 GB/s ->
+   ~2.2 ms/visit => +5-7% prefill. Verify: bit-compare on real checkpoint weights + full suite.
+2. Host-sync elimination: bmm proven T_e-invariant (same 64 rows inside a T_e=256 call: 0 bits
+   differ; batched-4-expert vs per-expert: 0) => fixed-cap tiers for prefill-shaped calls are
+   bit-exact and remove the per-call `counts.tolist()` sync + Python table build + H2D (the sync
+   drains the async pipeline 48x/chunk). Branch on pairs count (host-known, no sync): T large ->
+   fixed caps, decode path untouched. +1-3% (direct) plus pipelining headroom.
+3. TP2 allreduce overlap: a 2-rank sum is commutative-exact (a+b = b+a bitwise) => overlap
+   mechanics are gate-safe. ~190 ms/chunk exposed at 241K; hiding half => +4-7% long-ctx prefill.
+   The earlier AR rejection was the decode-side oneshot env; prefill overlap is untested.
+
+Dead ends re-confirmed: dequant reuse across a layer's two visits (visits separated by a full
+pass => 32 GB cache, dead); persistent weight-dequant cache (16 GB, dead); fused NVFP4 grouped
+GEMM (removes the 2.7 GB/visit weight round-trip - the single biggest structural item, F3zz1k's
+design - IMPOSSIBLE under bit-exactness; recorded for the policy file); attention far path at HW
+rate (closed). Dense-GEMM M-sensitivity quantified on real shapes: batched-vs-per-row flips
+0.005-0.024% of elements at M=4..64 - the mechanism behind trajectory divergence.
+
+Realistic gate-safe prefill ceiling: ~+8-12% (dequant retune + sync elimination + AR overlap).
+Time budget per 2048-token chunk at 241K: ~1288 ms total, MoE ~545 ms (48 visits x 11.37 ms), of
+which dequant-write 189 ms, bmm weight re-read ~110 ms, DPAS ~163 ms, epilogues/gather/sync the
+rest.
