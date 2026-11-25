@@ -82,6 +82,20 @@ A median margin of ~2 is not a near-tie. The drafter changes the distribution,
 so a reference captured with it on cannot judge a build with it off, and vice
 versa.
 
+**It changes tokens, not answers.** Three measurements on the same weights:
+
+| measurement | drafter on | drafter off |
+|---|---|---|
+| 300 prompts x 64 greedy tokens, identical output | 26.7% | — |
+| first divergence | median token 19 of 64 | — |
+| margin at divergence | median 0.133, p90 0.400 | — |
+| 25 code+math checks | 19/19 graded | 20/20 |
+| MMLU-Pro, 5-shot, 42 questions | 52.38% | 52.38% |
+
+So most continuations differ, but they differ by picking between near-equally
+likely tokens: the answers the checkers score do not change. The choice between
+the two profiles is about reproducibility, not quality.
+
 **Exactness profile.** With the drafter removed (tiered MoE kept), output was
 reproducible in every measurement taken: two captures back to back on an idle
 server agreed on all 576 positions (KL 0.00000), and eight identical prompts in
