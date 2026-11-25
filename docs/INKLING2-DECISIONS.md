@@ -554,3 +554,35 @@ not isolated, so an exact cache is necessary but not sufficient. Separately,
 two cold runs of one long prompt at a single sequence can also flip at a
 near-tie (0/4 at ~1.4K characters, 3-4/4 at 2-3.4K), so token identity is not
 a property the stack holds universally; the gate is a KL bound. See PERF-LOG.
+
+## 35. Two profiles, and what is parked (Nov 24)
+
+**Profile split.** `SPEC=1` (default) runs the DSpark drafter; `SPEC=0` is the
+exactness profile. They do not produce the same answers: on the 12 gate prompts
+the drafter changes 126 of 576 top-1 positions with a median old margin of 1.99
+logprob units, and 7 of 12 greedy texts. Each profile therefore needs its own
+reference capture; a gate captured under one cannot judge the other.
+
+**Exactness profile is reproducible.** Two idle sequential captures agree on
+576/576 (KL 0.00000); 8 identical prompts in one batch give 0/7 flips over three
+repeats. Captures must not overlap with other traffic: a concurrent capture
+measured 558/576.
+
+**Parked, with reasons:**
+- *Router GEMM, long single prompts.* The fp32 gate GEMM is bit-stable at
+  T<=256 and not at T>=512. Deterministic algorithms fix it (0/4 flips at every
+  length) but change the short-prompt bits, so it needs a one-time re-baseline
+  rather than a code change.
+- *Attention row geometry.* Identical rows enter the attention kernel and
+  differ on exit (attn_in 0/6475 vs attn_part 3231/6475, 1045 with the
+  batch-invariant wrapper). The likely cause is tiles aligned to the chunk start
+  rather than absolute positions; an independent implementation feeds relative
+  position keyed to absolute KV, which is the direction to take.
+- *Speculative decoding at depth 8.* At k=7 outputs change and throughput drops
+  (432/576, 54.6 tok/s against 92 at k=3), so the verification path is not
+  strictly output-preserving at that depth. Fixing it would turn the same
+  hardware into more throughput, but it is separate from the profiles above.
+- *Alternative drafter* (a retrained DSpark head, ~606 MB, claim 2.98x / accept
+  4.36). Rejected at both depths: k=7 gave 432/576 and 54.6 tok/s, k=3 gave
+  445/576 agreement (131 positions moved) and 72 tok/s, against 576/576 and
+  92 tok/s for the shipped drafter. It is slower in our stack, not faster.

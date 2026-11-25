@@ -23,6 +23,22 @@ PREFIX_ARG=(--no-enable-prefix-caching)
 [ "$PREFIX_CACHING" = "1" ] && PREFIX_ARG=(--enable-prefix-caching)
 # shellcheck disable=SC2206
 EXTRA=(${EXTRA_ARGS})
+
+# SPEC profile: 1 = keep whatever --speculative-config EXTRA_ARGS carries
+# (default), 0 = exactness profile, which removes that flag and its JSON.
+# Measured: without the drafter, eight identical prompts in one batch are
+# bit-identical across rows; with it they are not.
+SPEC="${SPEC:-1}"
+if [ "$SPEC" = "0" ]; then
+  _spec_filtered=()
+  _spec_skip=0
+  for _a in "${EXTRA[@]}"; do
+    if [ "$_spec_skip" = "1" ]; then _spec_skip=0; continue; fi
+    if [ "$_a" = "--speculative-config" ]; then _spec_skip=1; continue; fi
+    _spec_filtered+=("$_a")
+  done
+  EXTRA=("${_spec_filtered[@]}")
+fi
 if [ "$GRAPH" = "1" ]; then
   MODE_ARGS=(--compilation-config '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8],"max_cudagraph_capture_size":8}')
 else

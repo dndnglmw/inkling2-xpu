@@ -1179,7 +1179,7 @@ Exact-tail ring (opt-in, single sequence): 75K resend 0.32 s, 128K resend
 hit whose state rows cannot be written, or that lands outside the retained
 window, raises instead of being served. No multi-sequence support yet.
 
-## Nov 24 - 8-concurrent determinism: cache is not the cause
+## Nov 24 - 8-concurrent determinism: the cache does not explain the flips
 
 Design: one boot per configuration, per-request `cache_salt`. Per repeat, a
 batch of eight identical-shape prompts is sent three times: salt r-a (cold),
@@ -1203,7 +1203,9 @@ the 1e-4 range), but that was not measured at scale here.
 ## Nov 24 - where the run-to-run variation lives
 
 Batch sweep with one repeated prompt (prefix caching off, drafter off, batched
-matmul off): flips 1/2 at batch 1, 3/3 at 2, 3/9 at 4, 13/21 at 8. Concurrency
+matmul off, grouped Triton MoE - NOT the exactness profile used above): flips
+1/2 at batch 1, 3/3 at 2, 3/9 at 4, 13/21 at 8. The exactness profile uses the
+tiered bmm path and is measured separately. Concurrency
 is therefore not required.
 
 Length bisect on the live server, five cold runs per length, unique cache
@@ -1213,7 +1215,14 @@ the top-2 margin: prompts whose margin is thin at some step flip when the
 numerics wobble slightly, and longer prompts simply get more chances.
 
 The wobble survives at batch 1, without the cache and without the drafter, and
-our attention kernel is deterministic by construction (split-KV partials with a
-deterministic combine, no atomics). The remaining suspect is the torch/oneDNN
-GEMM path, the same family as the batched-matmul defect. Batch-invariant mode
+our attention kernel's reduce is deterministic in shape (split-KV partials with a
+fixed-order combine, no atomics), though its tiling was later found to depend on
+batch composition. The remaining suspect was the torch/oneDNN
+GEMM path, later confirmed for the fp32 gate GEMM. Batch-invariant mode
 cannot be used: the SWA backend refuses it and it would not cover those GEMMs.
+
+Profile comparison (Nov 24): exactness profile (no drafter) two idle captures
+576/576 KL 0.00000; 8-way 0/7 flips. Against the drafter-on capture: 450/576,
+KL 0.212, 126 flips with median old margin 1.99, 7/12 greedy texts different.
+Concurrent capture 558/576 KL 0.0109 (contaminated). Retrained drafter at k=3:
+445/576, 72 tok/s; at k=7: 432/576, 54.6 tok/s.

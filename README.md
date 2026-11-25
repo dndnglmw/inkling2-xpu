@@ -61,9 +61,40 @@ cache removes one source of variation, not every one.
 
 Run-to-run identity is not universal even at one sequence, either: with prefix
 caching off, the drafter off and one request at a time, a long prompt can still
-flip at a near-tie (0/4 flips at ~1.4K characters, 3-4/4 at 2-3.4K). The driver
+flip at a near-tie (0/4 flips at ~1.4K characters, 3/4 at 2.1K, 0/4 at 2.8K, 4/4 at 3.4K). The driver
 is the top-2 margin, not length. The 576-position gate bounds KL (<=0.002); it
 does not promise token identity at every margin.
+
+## Speculative decoding changes answers
+
+The DSpark drafter is part of the model (the checkpoint ships `mtp.safetensors`),
+and running with it is not a pure speed choice. Measured on the 12 gate prompts,
+same build, drafter on vs off:
+
+| | result |
+|---|---|
+| top-1 agreement | 450/576 |
+| mean KL | 0.212 (max 14.0) |
+| top-1 flips | 126, median old top-2 margin **1.99** logprob units |
+| greedy 48-token text | 7 of 12 differ |
+
+A median margin of ~2 is not a near-tie. The drafter changes the distribution,
+so a reference captured with it on cannot judge a build with it off, and vice
+versa.
+
+**Exactness profile.** With the drafter removed (tiered MoE kept), output was
+reproducible in every measurement taken: two captures back to back on an idle
+server agreed on all 576 positions (KL 0.00000), and eight identical prompts in
+one batch produced identical rows in three repeats (0/7 flips). Set `SPEC=0` in
+the launcher to run it. This does not cover long single prompts, which can still
+differ (next paragraph).
+
+Two caveats, both measured:
+- Reference captures must be serialised on an idle server. Capturing while
+  another client was running gave 558/576 and KL 0.0109.
+- Long single prompts can still differ run to run, with or without the drafter,
+  because the fp32 gate GEMM is not bit-stable above ~256 tokens on this stack.
+
 
 ## Repo layout
 
