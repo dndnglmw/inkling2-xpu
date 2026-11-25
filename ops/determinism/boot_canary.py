@@ -7,7 +7,7 @@ import urllib.request
 
 URL = "http://127.0.0.1:8000"
 MODEL = "inkling2-mini"
-REF = json.load(open("/home/ddngub/work/inkling-det/canary/canary_ref.json"))
+REF = json.load(open("/home/operator/work/inkling-det/canary/canary_ref.json"))
 
 
 def post(path, payload, timeout=600):
@@ -30,7 +30,7 @@ def metric_hits():
 hits0 = metric_hits()
 got = []
 for i, entry in enumerate(REF["short"]):
-    src = open("/home/ddngub/work/vllm/tests/models/inkling2/xpu/quality_vs_llamacpp.py").read()
+    src = open("/home/operator/work/vllm/tests/models/inkling2/xpu/quality_vs_llamacpp.py").read()
     import re
 
     PROMPTS = eval(re.search(r"PROMPTS = (\[.*?\n\])", src, re.S).group(1))

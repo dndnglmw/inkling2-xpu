@@ -586,3 +586,55 @@ measured 558/576.
   4.36). Rejected at both depths: k=7 gave 432/576 and 54.6 tok/s, k=3 gave
   445/576 agreement (131 positions moved) and 72 tok/s, against 576/576 and
   92 tok/s for the shipped drafter. It is slower in our stack, not faster.
+
+## 36. Acceptance, not attention: what actually moves tokens (Nov 25)
+
+Following the profile split in §35, a six-arm experiment pins down *where* speculative
+decoding changes a greedy continuation. Each arm captures the same 12 prompts x 48
+tokens (576 positions) and is compared against the frozen SPEC=0 reference. The
+reference reproduces bit-exactly across boots and days: an anchor captured two days
+earlier still matches at 576/576, KL 0.
+
+| arm | configuration | top-1 | prompts diverging |
+| --- | --- | ---: | ---: |
+| A | SPEC=0 reference | 576/576 | - |
+| B | drafter resident, zero proposals | 576/576 | 0/12 |
+| C | reject every draft, verify at k+1 rows | 575/576 | 1/12 |
+| D | accept at most the first draft | 424/576 | 8/12 |
+| E | as D, but later drafts zeroed instead of inverted | 423/576 | 8/12 |
+| H | k=1, natural acceptance | 401/576 | 8/12 |
+| - | drafter fully active | 450/576 | 5/12 |
+
+D and E separate later-draft content from the accept path and differ on one prompt
+only; their first divergences are the same list. H accepts a draft and never rejects a
+tail, and diverges with the same onset positions as D. The trigger is acceptance
+itself: neither the number of drafts nor tail rejection matters, and a drafter that is
+merely resident changes nothing.
+
+**The attention row geometry is not the cause at these lengths.** An isolated kernel
+probe (synthetic tensors, production block-table width) compares one row computed alone
+against the same row inside a k+1-row block:
+
+| sequence length | sliding-window layer | full-attention layer |
+| --- | --- | --- |
+| <= 512 | bitwise equal, every row | bitwise equal, every row |
+| 1100, 2048 | rows 1..k differ | all rows differ |
+
+Divergence appears only once the sequence passes the relative-bias extent (1024),
+which the 576-position gate never reaches. A per-row verify path that is bit-identical
+by construction was implemented and measured end to end: it changes nothing (424/576,
+identical to arm D), because at these lengths there is nothing to change.
+
+**What does the work.** Rows after the first read KV that the current forward wrote
+itself, from hidden states computed at k+1 rows. A sequential decode would have written
+those entries from a one-row forward. One-row and k+1-row forwards are not bit-identical
+- dense GEMMs, the MoE router and grouped experts, and the norms all re-tile with row
+count - so an accepted token hands the next row a key/value that differs in its last
+bits. The first row reads only KV written by earlier steps, which is why rejecting
+every draft stays clean and every accepting arm diverges.
+
+**Consequence.** Exact speculative decoding here needs forward-wide batch invariance -
+every op at k+1 rows bitwise equal to one row - not a kernel-local fix. Until then the
+two profiles stand as in §35: SPEC=0 for bit-exactness, the drafter for speed, with the
+divergence confined to near-ties (median margin 0.133) and no measurable quality
+difference on the checks in the README.

@@ -2,7 +2,7 @@
 # Production restart with the bit-exact boot canary as the admission gate.
 # Usage: restart-prod-canary.sh   (env CANARY_ALLOW_WARM=1 = temporary Mode B)
 set -u
-D=/home/ddngub/work/inkling-det
+D=/home/operator/work/inkling-det
 C="$D/canary/boot_canary.py"
 
 attempt() {
@@ -33,5 +33,5 @@ echo "[canary] restart + cold pass (attempt 2)"
 if attempt; then echo "[canary] ADMITTED (cold pass, attempt 2)"; exit 0; fi
 
 echo "[canary] COLD FAIL on attempt 2 - NOT ADMITTING CLEAN: server left UP but flagged"
-echo "[canary] investigate: /home/ddngub/work/inkling-det/logs/"
+echo "[canary] investigate: /home/operator/work/inkling-det/logs/"
 exit 1
