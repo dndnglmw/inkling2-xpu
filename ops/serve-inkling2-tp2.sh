@@ -50,6 +50,8 @@ for _ in $(seq 1 60); do
     sleep 5
 done
 
+# ring is opt-in: setting INK2_RING_PREFIX_CACHE=1 also needs
+# MAX_NUM_SEQS=1 and PREFIX_CACHING=1, or the model raises at boot.
 exec docker run --rm --name "$NAME" --ulimit core=0 \
   --device /dev/dri --group-add "$RGD" --group-add "$VGD" \
   --cap-add SYS_PTRACE --ipc=host --shm-size=32g \
@@ -61,9 +63,10 @@ exec docker run --rm --name "$NAME" --ulimit core=0 \
   --env VLLM_XPU_ENABLE_XPU_GRAPH="$GRAPH" --env VLLM_XPU_ALLREDUCE_HOST_WAIT=1 \
   --env CCL_ATL_TRANSPORT=ofi --env FI_PROVIDER=tcp --env FI_TCP_IFACE=lo \
   --env CCL_ZE_IPC_EXCHANGE=pidfd --env CCL_SEND=direct --env CCL_RECV=direct --env CCL_TOPO_P2P_ACCESS=1 \
-  --env CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=4294967296 \
+  --env CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=4194304 \
   --env CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD=4294967296 \
   --env CCL_SYCL_REDUCE_SCATTER_SIMPLE_THRESHOLD=4294967296 \
+  --env INK2_RING_PREFIX_CACHE="${INK2_RING_PREFIX_CACHE:-${RING_PREFIX_CACHE:-0}}" \
   --entrypoint python3 "$IMAGE" \
   -m vllm.entrypoints.openai.api_server \
   --model "$CONTAINER_MODEL" --served-model-name "$SERVED_NAME" --host 0.0.0.0 --port 8000 \

@@ -9,3 +9,6 @@ DSpark drafter port, and a one-shot P2P all-reduce for the XPU communicator.
 
 Quality validation uses llama.cpp (ggml-org/llama.cpp, MIT) as a reference
 oracle via user-run servers; no llama.cpp code is included.
+
+The exact-tail prefix cache is adapted from the opt-in ring in
+SergiioB/intel-arc-pro-b70-inference-cookbook (PR #112), by its authors.

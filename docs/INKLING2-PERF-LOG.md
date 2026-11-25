@@ -1161,3 +1161,20 @@ with explicit log capture, third time this lesson has applied.
     zero-prefix-hit assertion, max 2 restarts). Upstream repro prepared for
     intel/torch-xpu-ops. Also this day: 200K cap rejected (max_model_len is a trajectory
     axis; pool 441K -> 387K at 200K), u=0.88 adopted (pool 441.6K / 1.68x).
+
+## Nov 24 - head chunking, all-reduce threshold, exact-tail ring
+
+Chunk-16 fp32 head (default): head 49.5 -> 3.4 ms at 32 rows, 24.8 -> 1.7 ms at
+16 rows, 6.2 -> 1.6 ms at 4 rows (single card, full 201K vocab). 8-concurrent
+decode 89.9 -> 109.4 tok/s (+21.7%); single-stream canonical 92.3 vs 91.1
+(within noise). Gate: 576/576 top-1, KL 0.000, three fresh boots.
+
+All-reduce threshold 4 GiB -> 4 MiB: prefill 8K 2,017 -> 2,114 (+4.8%),
+128K 1,771 -> 1,857 (+4.9%). Decode unchanged. The 64K point was measured once
+at 1,972 and once 15.7% higher; with one sample each, neither is quoted. 8K/64K/128K are the sizes this ladder is measured
+at; the earlier 37K/125K/230K ladder predates this work and is superseded.
+
+Exact-tail ring (opt-in, single sequence): 75K resend 0.32 s, 128K resend
+0.44 s, output bit-identical to the original run. Fail-closed for eager forwards: a
+hit whose state rows cannot be written, or that lands outside the retained
+window, raises instead of being served. No multi-sequence support yet.

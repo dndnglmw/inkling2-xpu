@@ -16,9 +16,9 @@ the *original* 4-bit checkpoint (no requantisation).
 
 | | |
 |---|---|
-| Prefill | 1931 / 1714 / 1480 tok/s at 37K / 125K / 230K-token prompts (diverse text) |
-| Decode | DSpark depth 3, ~100 tok/s mean short context; 77 (code) / 59 (prose) at 234K |
-| Context | 262,144-token cap; BF16 KV (live FP8 KV rejected: KL 0.318 vs 0.002 gate); needle retrieved at 243K; KV pool 439,855 tokens (1.68× concurrency) |
+| Prefill | 2,114 / 1,857 tok/s at 8K / 128K-token prompts (diverse text; the 64K point was measured twice with a wide spread and is not quoted) |
+| Decode | DSpark depth 3, 92 tok/s single-stream, 109 tok/s at 8 concurrent; 77 (code) / 59 (prose) at 234K |
+| Context (Nov 23 build, not re-run after the threshold change) | 262,144-token cap; BF16 KV (live FP8 KV rejected: KL 0.318 vs 0.002 gate); needle retrieved at 243K; KV pool ≈1.68× the context length |
 | Weights | 8.9 GiB per card — native NVFP4 (layers 0–19) + MXFP8 (20–23), dequantised in-kernel |
 | Quality | 12/12 top-1 agreement with a llama.cpp 3-pass oracle, mean KL 0.0013 |
 | Graphs | XPU full-decode graphs (sizes 1, 2, 4, 8) incl. the DSpark verify step |
@@ -26,11 +26,41 @@ the *original* 4-bit checkpoint (no requantisation).
 All numbers, decisions and rejected ideas are in [`docs/`](docs/) — this repo
 documents the setup as actually operated, including what is *not* done.
 
+## Nov 24 update
+
+The head and threshold changes were checked against the 576-position
+bit-exactness gate (576/576 top-1, KL 0.000 against the frozen reference),
+and the head was additionally confirmed over three fresh boots. The ring is
+default-off; its evidence is bit-identical 75K/128K resends.
+
+| Change | Effect | Status |
+|---|---|---|
+| Chunk-16 fp32 logits head | oneMKL on this stack switches GEMM kernels at M=26; chunking keeps every head GEMM in the exact regime and reads the bf16 weight once per 16 rows. Head 49.5 → 3.4 ms at 32 rows; 8-concurrent decode 89.9 → 109.4 tok/s (+21.7%); single-stream 92.3 vs 91.1 (within noise) | default |
+| 4 MiB all-reduce simple threshold | prefill 8K 2,017 → 2,114 (+4.8%), 128K 1,771 → 1,857 (+4.9%); decode unchanged | default (`CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD=4194304`) |
+| Exact-tail ring prefix cache | a resend whose prefill ends exactly at the retained frontier replays the original final chunk (hidden states + paged KV rows) instead of recomputing at a different chunk size. 75K/128K resends bit-identical, 0.32/0.44 s | **opt-in**, single sequence only: `--max-num-seqs 1 --enable-prefix-caching` and `INK2_RING_PREFIX_CACHE=1` |
+
+The ring retains the last `slack` tokens of recurrent state (sliding-window
+conv cache, local ring) plus the final-chunk hidden rows, keyed to the exact
+position it was captured at. It fails closed for eager forwards: a hit whose
+state rows cannot be written, or that lands outside the retained window,
+raises instead of being served. It is ported from
+[SergiioB/intel-arc-pro-b70-inference-cookbook](https://github.com/SergiioB/intel-arc-pro-b70-inference-cookbook)
+with the attribution kept in the source files.
+
+The decode and prefill rows above are from the default profile, which runs
+with the ring off; the ring is a single-sequence opt-in and is not part of
+those numbers.
+
+Concurrency is not supported yet: at more than one sequence, vLLM's own
+prefix cache resumes at a block-aligned boundary and does not restore the
+recurrent tail, so cached and cold output can differ. That is an open item,
+not a shipped feature.
+
 ## Repo layout
 
 | Path | Contents |
 |---|---|
-| `patches/` | The whole port as `git am`-able commit(s) on top of vLLM base commit `4c61621b4` |
+| `patches/` | The whole port as `git am`-able commit(s) on top of vLLM base commit `4c61621b4`. `0001` now also carries the vision and determinism changes first published as `0002`/`0003`; `0002` is the KV-manager hook for the ring |
 | `overlay/` | The same files laid out for manual copy into a vLLM checkout (`vllm/models/inkling2/…`, `tests/…`, `scripts/…`) |
 | `docs/INKLING2-GO-LIVE.md` | Operations record: what runs, launchers, env switches, rollback |
 | `docs/INKLING2-DECISIONS.md` | Decisions, rejected optimisations, limitations, open items |

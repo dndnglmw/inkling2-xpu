@@ -500,3 +500,49 @@ planner quantizes worse at 200K, so 262144 strictly dominates) and max_model_len
 max-model-len-shape as a trajectory axis in the config-freeze list; u=0.88 adopted (pool
 restored to ~441.6K, 1.68x; 0.95 rejected on OOM math - the 250K headroom would go to about
 -1.7 GiB per card).
+
+## 29. Chunk-16 fp32 logits head: exact and 15x cheaper at 32 rows (Nov 24)
+
+The fp32 head previously ran one `bmm` per row (adopted for the batched-matmul
+mode-B defect). A row sweep on this stack (torch 2.15.0+xpu, SYCL 2026.1.2)
+showed oneMKL switching GEMM kernels at M=26: rows <=25 are bit-identical to
+the per-row result, rows 26-32 are not. Chunking at 16 rows keeps every GEMM
+inside the exact regime and reads the bf16 weight once per chunk instead of
+once per row: 49.5 -> 3.4 ms at 32 rows, 24.8 -> 1.7 ms at 16. Adopted after
+three fresh-boot gates (576/576, KL 0.000). `INKLING2_HEAD_PER_ROW=1` restores
+the old path for one release. Re-run the row sweep on any torch/SYCL/driver
+upgrade; do not pre-transpose the weight (changes the last bits, 2.15e-6) and
+do not materialise a repeated weight (696 ms).
+
+## 30. All-reduce simple threshold at 4 MiB (Nov 24)
+
+`CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD` was 4 GiB, which sent every TP2
+all-reduce down the latency-heavy path. At 4 MiB: prefill 8K 2,017 -> 2,114
+(+4.8%), 128K 1,771 -> 1,857 (+4.9%), decode unchanged. A second 64K sample read
+15.7% higher; with one sample each, neither 64K figure is quoted. The alternative oneCCL transports tried here did not initialise in this container
+(they need a launch model or device access the server does not have), so this
+threshold is the only all-reduce win available without restructuring the
+launcher.
+
+## 31. Exact-tail ring prefix cache: opt-in, single sequence (Nov 24)
+
+Problem: a cached resend can resume at a block-aligned boundary and recompute
+its final chunk at a different size than the original run. On this stack the
+result is close but not bit-identical, and the recurrent tail (sliding-window
+conv cache, local ring, drafter state) is not what vLLM's block-hash cache
+restores.
+
+Design: the worker captures the last `slack` rows of recurrent state plus the
+final-chunk hidden rows and the paged KV rows at the exact frontier, and
+replays them when a resend ends exactly there. The scheduler admits only hits
+the retained frontier can cover; the worker re-raises if it ever sees an
+uncovered position, so state is never silently reused. 75K and 128K resends
+are bit-identical at 0.32 / 0.44 s.
+
+Status: opt-in (`INK2_RING_PREFIX_CACHE=1`), single sequence only
+(`--max-num-seqs 1`), with prefix caching on. State rows for hits inside the
+retained slack window are rewritten into the request's own slots; a hit whose
+rows cannot be written raises instead of being served. The guard covers eager
+forwards -- graph-mode decode neither reads nor mutates the markers. What is
+missing for concurrency is per-request capture and a scheduler that admits only
+boundaries captured for that request.

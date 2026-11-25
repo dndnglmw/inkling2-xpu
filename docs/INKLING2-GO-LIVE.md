@@ -102,13 +102,20 @@ What the repo does contain, so the reader can compare:
 | `CCL_ZE_IPC_EXCHANGE` | `pidfd` | |
 | `CCL_SEND` / `CCL_RECV` | `direct` | |
 | `CCL_TOPO_P2P_ACCESS` | `1` | GPU-to-GPU direct, no host-memory staging |
-| `CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD` | `4294967296` | |
+| `CCL_SYCL_ALLREDUCE_SIMPLE_THRESHOLD` | `4194304` | 4 MiB; prefill +4.8% at 8K, +4.9% at 128K |
 | `CCL_SYCL_ALLGATHERV_SIMPLE_THRESHOLD` | `4294967296` | |
 | `CCL_SYCL_REDUCE_SCATTER_SIMPLE_THRESHOLD` | `4294967296` | |
 
 Container flags from the same script: `--ipc=host --shm-size=32g --cap-add SYS_PTRACE --ulimit core=0`,
 `--device /dev/dri` plus the render and video groups, `--volume $WORK_DIR:/work`,
 `--workdir /work/vllm`, `--publish ${PORT}:8000`.
+
+Prefix-cache and head switches:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INK2_RING_PREFIX_CACHE` | `0` | opt-in exact-tail ring; requires `--max-num-seqs 1` and `--enable-prefix-caching`, otherwise the model raises at boot |
+| `INKLING2_HEAD_PER_ROW` | `0` | `1` restores the per-row fp32 head (rollback for the chunk-16 head) |
 
 Launcher knobs (environment of `serve-inkling2-tp2.sh`): `PORT` (8000), `NAME`, `IMAGE`
 (`inkling2-xpu:dev`), `MODEL_DIR`, `CODE_DIR`, `WORK_DIR`, `SERVED_NAME` (`inkling2-mini`), `MAX_MODEL_LEN`

@@ -537,6 +537,10 @@ class Inkling2XPULoopModel(Inkling2XPUModel):
             return out, [*aux_hidden_states, out]
         return out
 
+
+_HEAD_ROW_CHUNK = 16  # keep every head GEMM below the oneMKL M=26 kernel switch
+
+
 class _XPULogitsProcessor(LogitsProcessor):
     """fp32 LM head without materialising an fp32 copy of the weight each step.
 
@@ -553,15 +557,32 @@ class _XPULogitsProcessor(LogitsProcessor):
             and lm_head.weight.dtype == torch.bfloat16
         ):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            # Per-row bmm: bit-identical to the batched form's stable mode, but
-            # immune to the batched-matmul mode-B nondeterminism (measured Nov 23:
-            # batched flips 0-2 elements per call across processes; per-row exact
-            # in every run). flat has <= max_num_seqs rows, so the loop is cheap.
-            wt = lm_head.weight.t().unsqueeze(0)
-            logits = torch.cat([
-                torch.bmm(flat[i:i + 1].unsqueeze(0), wt, out_dtype=torch.float32)[0]
-                for i in range(flat.shape[0])
-            ])
+            # OneMKL switches GEMM kernels at M=26 on this stack (torch 2.15.0+xpu,
+            # SYCL 2026.1.2): rows<=25 are bit-identical to the per-row bmm, rows
+            # 26-32 diverge (measured on this stack). Chunk at _HEAD_ROW_CHUNK so
+            # every GEMM stays in the exact regime; the head reads the bf16 weight
+            # once per chunk instead of once per row.
+            # single GPU, full 201K vocab: rows=4 6.21 -> 1.59 ms,
+            # rows=16 24.76 -> 1.68, rows=32 49.49 -> 3.37. Verified rows=1..32,
+            # 20 repeats, 3 fresh processes, row-position invariance true.
+            # The per-row loop was adopted for the batched-matmul mode-B flip;
+            # that defect is batch>1 bmm, not these batch=1 GEMMs. Old path kept
+            # one release: INKLING2_HEAD_PER_ROW=1 (kept for one release).
+            # Re-run the row sweep on any torch/SYCL/driver upgrade.
+            # Do not pre-transpose to a contiguous [H,V] copy (changes the last
+            # bits, max 2.15e-6) and do not materialize a repeated weight (696 ms).
+            if os.environ.get("INKLING2_HEAD_PER_ROW", "0") == "1":
+                wt = lm_head.weight.t().unsqueeze(0)
+                logits = torch.cat([
+                    torch.bmm(flat[i:i + 1].unsqueeze(0), wt, out_dtype=torch.float32)[0]
+                    for i in range(flat.shape[0])
+                ])
+            else:
+                logits = torch.cat([
+                    torch.mm(flat[i:i + _HEAD_ROW_CHUNK],
+                             lm_head.weight.t(), out_dtype=torch.float32)
+                    for i in range(0, flat.shape[0], _HEAD_ROW_CHUNK)
+                ])
             if embedding_bias is not None:
                 logits = logits + embedding_bias.to(torch.float32)
             return logits.reshape(*hidden_states.shape[:-1], -1)
@@ -634,6 +655,22 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             org_vocab_size=text_config.vocab_size,
             soft_cap=text_config.final_logit_softcapping,
         )
+        self.ring_prefix_worker = None
+        if os.environ.get("INK2_RING_PREFIX_CACHE", "0") == "1":
+            if not vllm_config.cache_config.enable_prefix_caching:
+                raise ValueError(
+                    "INK2_RING_PREFIX_CACHE requires --enable-prefix-caching"
+                )
+            if vllm_config.scheduler_config.max_num_seqs != 1:
+                raise ValueError(
+                    "INK2_RING_PREFIX_CACHE requires --max-num-seqs 1"
+                )
+            from .ring_prefix_worker import RingPrefixWorker
+
+            self.ring_prefix_worker = RingPrefixWorker(
+                vllm_config.compilation_config.static_forward_context,
+                vllm_config,
+            )
 
     def get_language_model(self) -> nn.Module:
         return self
@@ -681,10 +718,19 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        worker = self.ring_prefix_worker
+        orig_embeds = inputs_embeds
+        if worker is not None:
+            early = worker.entry(input_ids, positions, orig_embeds)
+            if early is not None:
+                return early
         if inputs_embeds is None:
             assert input_ids is not None
             inputs_embeds = self.model.embed_input_ids(input_ids)
-            return self.model(positions, inputs_embeds)
+            output = self.model(positions, inputs_embeds)
+            if worker is not None:
+                worker.exit(input_ids, orig_embeds, output)
+            return output
         # requires_raw_input_tokens path (mm-active boots): the runner passes the
         # merged embeds alongside input_ids. Re-embed the tokens here (identical
         # ops to text-only boots, inside the graph) and overlay the encoder
@@ -704,7 +750,10 @@ class Inkling2XPUForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 overlay = inputs_embeds[: embeds.shape[0]].to(embeds.dtype)
                 cond = mask.unsqueeze(-1).expand_as(embeds).contiguous()
                 embeds = torch.where(cond, overlay, embeds)
-        return self.model(positions, embeds)
+        output = self.model(positions, embeds)
+        if worker is not None:
+            worker.exit(input_ids, orig_embeds, output)
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
