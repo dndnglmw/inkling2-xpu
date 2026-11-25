@@ -11,4 +11,5 @@ Quality validation uses llama.cpp (ggml-org/llama.cpp, MIT) as a reference
 oracle via user-run servers; no llama.cpp code is included.
 
 The exact-tail prefix cache is adapted from the opt-in ring in
-SergiioB/intel-arc-pro-b70-inference-cookbook (PR #112), by its authors.
+SergiioB/intel-arc-pro-b70-inference-cookbook (PR #112),
+MIT License, Copyright (c) 2026 SergiioB.

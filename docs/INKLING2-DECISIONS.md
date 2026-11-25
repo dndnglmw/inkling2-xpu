@@ -545,4 +545,9 @@ retained slack window are rewritten into the request's own slots; a hit whose
 rows cannot be written raises instead of being served. The guard covers eager
 forwards -- graph-mode decode neither reads nor mutates the markers. What is
 missing for concurrency is per-request capture and a scheduler that admits only
-boundaries captured for that request.
+boundaries captured for that request. Measurement on Nov 24 puts a harder limit
+upstream of the cache: at eight concurrent sequences (batched matmul off, with
+and without the drafter), two identical cold runs mismatched in 13-15 of 40
+comparisons, nearly all at the first generated token, while cache-hit runs were
+lower (6-9 of 40). The cause is likely batch composition or scheduling and was
+not isolated, so an exact cache is necessary but not sufficient; see PERF-LOG.

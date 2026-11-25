@@ -51,10 +51,13 @@ The decode and prefill rows above are from the default profile, which runs
 with the ring off; the ring is a single-sequence opt-in and is not part of
 those numbers.
 
-Concurrency is not supported yet: at more than one sequence, vLLM's own
-prefix cache resumes at a block-aligned boundary and does not restore the
-recurrent tail, so cached and cold output can differ. That is an open item,
-not a shipped feature.
+Concurrency is not covered. In two boots at eight concurrent sequences with
+batched matmul off (one with the DSpark drafter, one without), two identical
+**cold** runs mismatched in 15/40 and 13/40 comparisons (eight prompts x five
+repeats), nearly all at the first generated token. The matching cache-hit
+comparisons were lower in both boots (6/40, 9/40). The cause is likely
+scheduling or batch composition, which this test did not isolate: an exact
+cache removes one source of variation, not every one.
 
 ## Repo layout
 

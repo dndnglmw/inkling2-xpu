@@ -1178,3 +1178,24 @@ Exact-tail ring (opt-in, single sequence): 75K resend 0.32 s, 128K resend
 0.44 s, output bit-identical to the original run. Fail-closed for eager forwards: a
 hit whose state rows cannot be written, or that lands outside the retained
 window, raises instead of being served. No multi-sequence support yet.
+
+## Nov 24 - 8-concurrent determinism: cache is not the cause
+
+Design: one boot per configuration, per-request `cache_salt`. Per repeat, a
+batch of eight identical-shape prompts is sent three times: salt r-a (cold),
+salt r-a again (prefix hit), salt r-b (cold, unseen salt). Control = cold vs
+cold; treatment = cold vs hit. Same prompts and order; eight concurrent.
+
+| boot (batched matmul off in both) | control | treatment | control max KL | treatment max KL |
+|---|---|---|---|---|
+| no drafter | 15/40 | 6/40 | 2.42 | 1.36 |
+| DSpark k=3 | 13/40 | 9/40 | 1.06 | 1.34 |
+
+Each boot ran eight prompts x five repeats = 40 comparisons per arm; nearly all
+mismatches were at the first generated token. The aggregate prefix-cache hit
+rate during the runs was ~30%, i.e. one batch in three -- the same-salt resend
+only, so the cold arm really is cold. Two identical cold runs therefore
+mismatched as often as (or more than) a cold run and its cache hit: the
+variation is likely scheduling or batch composition, which this design did not
+isolate. Single-request runs in this work stayed stable (no token flips, KL in
+the 1e-4 range), but that was not measured at scale here.
