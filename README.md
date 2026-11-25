@@ -59,6 +59,12 @@ comparisons were lower in both boots (6/40, 9/40). The cause is likely
 scheduling or batch composition, which this test did not isolate: an exact
 cache removes one source of variation, not every one.
 
+Run-to-run identity is not universal even at one sequence, either: with prefix
+caching off, the drafter off and one request at a time, a long prompt can still
+flip at a near-tie (0/4 flips at ~1.4K characters, 3-4/4 at 2-3.4K). The driver
+is the top-2 margin, not length. The 576-position gate bounds KL (<=0.002); it
+does not promise token identity at every margin.
+
 ## Repo layout
 
 | Path | Contents |

@@ -550,4 +550,7 @@ upstream of the cache: at eight concurrent sequences (batched matmul off, with
 and without the drafter), two identical cold runs mismatched in 13-15 of 40
 comparisons, nearly all at the first generated token, while cache-hit runs were
 lower (6-9 of 40). The cause is likely batch composition or scheduling and was
-not isolated, so an exact cache is necessary but not sufficient; see PERF-LOG.
+not isolated, so an exact cache is necessary but not sufficient. Separately,
+two cold runs of one long prompt at a single sequence can also flip at a
+near-tie (0/4 at ~1.4K characters, 3-4/4 at 2-3.4K), so token identity is not
+a property the stack holds universally; the gate is a KL bound. See PERF-LOG.

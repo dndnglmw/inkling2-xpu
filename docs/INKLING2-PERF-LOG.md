@@ -1199,3 +1199,21 @@ mismatched as often as (or more than) a cold run and its cache hit: the
 variation is likely scheduling or batch composition, which this design did not
 isolate. Single-request runs in this work stayed stable (no token flips, KL in
 the 1e-4 range), but that was not measured at scale here.
+
+## Nov 24 - where the run-to-run variation lives
+
+Batch sweep with one repeated prompt (prefix caching off, drafter off, batched
+matmul off): flips 1/2 at batch 1, 3/3 at 2, 3/9 at 4, 13/21 at 8. Concurrency
+is therefore not required.
+
+Length bisect on the live server, five cold runs per length, unique cache
+salts: 1,376 chars 0/4; 2,064 chars 3/4; 2,752 chars 0/4; 3,441 chars 4/4. The
+result is not monotonic in length, so the driver is not a size threshold but
+the top-2 margin: prompts whose margin is thin at some step flip when the
+numerics wobble slightly, and longer prompts simply get more chances.
+
+The wobble survives at batch 1, without the cache and without the drafter, and
+our attention kernel is deterministic by construction (split-KV partials with a
+deterministic combine, no atomics). The remaining suspect is the torch/oneDNN
+GEMM path, the same family as the batched-matmul defect. Batch-invariant mode
+cannot be used: the SWA backend refuses it and it would not cover those GEMMs.
