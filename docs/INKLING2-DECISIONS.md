@@ -652,8 +652,7 @@ wrong drafts change the computation itself.
 
 **E2 - verify-path-intrinsic accumulation.** With the token path held identical (drafts
 replaced by the no-drafter reference stream), the k+1-row verify path still diverges from the
-one-row decode path at token 39 (captured) and 41 (eager). The onset position is prompt- and
-boot-dependent; the flip lands at the first near-tie the accumulated drift crosses. The two
+one-row decode path at token 39 (captured) and 41 (eager). The onset position is prompt-dependent; the flip lands at the first near-tie the accumulated drift crosses. The two
 are separate captured graphs of the same operations.
 
 **Mechanism, all three layers measured.**
