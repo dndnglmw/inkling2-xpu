@@ -633,8 +633,53 @@ count - so an accepted token hands the next row a key/value that differs in its 
 bits. The first row reads only KV written by earlier steps, which is why rejecting
 every draft stays clean and every accepting arm diverges.
 
-**Consequence.** Exact speculative decoding here needs forward-wide batch invariance -
-every op at k+1 rows bitwise equal to one row - not a kernel-local fix. Until then the
+**Consequence (revised in §37).** Exact speculative decoding here needs more than a
+kernel-local fix; §37 identifies what actually differs. Until then the
 two profiles stand as in §35: SPEC=0 for bit-exactness, the drafter for speed, with the
 divergence confined to near-ties (median margin 0.133) and no measurable quality
 difference on the checks in the README.
+
+## 37. Campaign close-out: why speculative decoding changes greedy tokens (Nov 25)
+
+This supersedes the closing paragraph of §36.
+
+**Two independent effects, both measured.**
+
+**E1 - input divergence.** When a draft token differs from the greedy path, the verify block
+computes different per-expert group sizes and a different token path. Onsets under natural
+drafts: tokens 2/5/12. This survives perfectly deterministic kernels: wrong drafts change the
+computation itself.
+
+**E2 - verify-path-intrinsic accumulation.** With the token path held identical (drafts
+replaced by the no-drafter reference stream), the k+1-row verify path still diverges from the
+one-row decode path at token 39 (captured) and 41 (eager). The two are separate captured
+graphs of the same operations, and the captures freeze different tilings.
+
+**Mechanism, all three layers measured.**
+
+| layer | evidence |
+| --- | --- |
+| origin | fp32 reduction-order differences of about 4e-6, measured in the loop controllers |
+| crossing | bf16 layer outputs hide them per component per crossing |
+| observable | the boundary row's top-20 rotates 0.1-0.2 nats before any argmax moves (20/20 and 19/19 coordinates above 1e-5, 18/19 above 1e-2, max 0.19); the two competing tokens move in opposite directions for a relative swing of about 0.29 nats; the flip lands at token 41 |
+
+**Consequences.**
+
+- The LM head is the **last carrier, not the origin**. A deterministic logits reduction would
+  make its own contribution deterministic, which is 100-1000x below the measured shift, and
+  would not remove an inherited 0.15-nat rotation.
+- Every operation probed in isolation is row-invariant (paged attention, router, both MoE
+  paths, short conv, loop controllers, tensor-parallel all-reduce, bf16 dense). The difference
+  is not in any of them individually but in what the captures freeze at k+1 rows versus one
+  row.
+- Fix surface, honestly ordered: accept; capture-side per-row verify (bit-exact by
+  construction if the ops are row-invariant, priced at roughly four step-equivalents against
+  acceptance 1.6-3.0 and therefore net-negative as a production mode); or a hybrid once a
+  repaired per-position map names the differing operations.
+
+**Production call unchanged:** the drafter for speed, the no-drafter profile when
+bit-exactness is required. Quality is unaffected - the divergence is confined to near-ties.
+
+One open residue, recorded rather than glossed: the 0.1-0.2 nat rotations imply more bf16
+survivors per layer than a naive 0.03-percent estimate suggests, so per-layer amplification
+is not fully quantified.
