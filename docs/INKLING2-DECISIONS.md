@@ -646,21 +646,22 @@ This supersedes the closing paragraph of §36.
 **Two independent effects, both measured.**
 
 **E1 - input divergence.** When a draft token differs from the greedy path, the verify block
-computes different per-expert group sizes and a different token path. Onsets under natural
-drafts: tokens 2/5/12. This survives perfectly deterministic kernels: wrong drafts change the
-computation itself.
+computes different per-expert group sizes and a different token path. Per-prompt onsets under
+natural drafts appear as early as token 2. This survives perfectly deterministic kernels:
+wrong drafts change the computation itself.
 
 **E2 - verify-path-intrinsic accumulation.** With the token path held identical (drafts
 replaced by the no-drafter reference stream), the k+1-row verify path still diverges from the
-one-row decode path at token 39 (captured) and 41 (eager). The two are separate captured
-graphs of the same operations, and the captures freeze different tilings.
+one-row decode path at token 39 (captured) and 41 (eager). The onset position is prompt- and
+boot-dependent; the flip lands at the first near-tie the accumulated drift crosses. The two
+are separate captured graphs of the same operations.
 
 **Mechanism, all three layers measured.**
 
 | layer | evidence |
 | --- | --- |
-| origin | fp32 reduction-order differences of about 4e-6, measured in the loop controllers |
-| crossing | bf16 layer outputs hide them per component per crossing |
+| origin | fp32 reduction-order differences of about 4e-6, measured in the fp32 cross-pass readout that feeds the loop controllers (a batched matmul over the previous pass's outputs) |
+| crossing | bf16 layer outputs hide them: a 4e-6 difference sits well below the bf16 grid (about 4e-3 relative), so roughly one component in 3000 survives a crossing |
 | observable | the boundary row's top-20 rotates 0.1-0.2 nats before any argmax moves (20/20 and 19/19 coordinates above 1e-5, 18/19 above 1e-2, max 0.19); the two competing tokens move in opposite directions for a relative swing of about 0.29 nats; the flip lands at token 41 |
 
 **Consequences.**
@@ -668,18 +669,23 @@ graphs of the same operations, and the captures freeze different tilings.
 - The LM head is the **last carrier, not the origin**. A deterministic logits reduction would
   make its own contribution deterministic, which is 100-1000x below the measured shift, and
   would not remove an inherited 0.15-nat rotation.
-- Every operation probed in isolation is row-invariant (paged attention, router, both MoE
-  paths, short conv, loop controllers, tensor-parallel all-reduce, bf16 dense). The difference
-  is not in any of them individually but in what the captures freeze at k+1 rows versus one
-  row.
+- **No single operation is incorrect.** The verify and decode captures are separate
+  compilations of the same operations, and the end-to-end divergence on identical tokens shows
+  their frozen kernel selections do not agree row-for-row. Every operation probed in isolation
+  is row-invariant (paged attention, router, both MoE paths, short conv, the loop controllers'
+  gated blend at production shape, tensor-parallel all-reduce, bf16 dense). The one exception
+  is the cross-pass readout above, which is run-to-run nondeterministic in eager execution even
+  at a single row.
 - Fix surface, honestly ordered: accept; capture-side per-row verify (bit-exact by
-  construction if the ops are row-invariant, priced at roughly four step-equivalents against
-  acceptance 1.6-3.0 and therefore net-negative as a production mode); or a hybrid once a
-  repaired per-position map names the differing operations.
+  construction - it replays the sequential computation, one row at a time, inside one graph
+  replay - priced at roughly four step-equivalents against acceptance 1.6-3.0 and therefore
+  net-negative as a production mode); or a hybrid once a repaired per-position map names the
+  differing operations.
 
-**Production call unchanged:** the drafter for speed, the no-drafter profile when
-bit-exactness is required. Quality is unaffected - the divergence is confined to near-ties.
+**Production call unchanged:** the drafter for speed, the no-drafter profile when bit-exactness
+is required. Task-level quality is unchanged in measurement: identical benchmark scores in both
+arms, and task outcomes differing by at most one near-tie task in the probe.
 
 One open residue, recorded rather than glossed: the 0.1-0.2 nat rotations imply more bf16
-survivors per layer than a naive 0.03-percent estimate suggests, so per-layer amplification
-is not fully quantified.
+survivors per layer than the one-in-3000 estimate suggests, so per-layer amplification is not
+fully quantified.
